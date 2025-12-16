@@ -106,6 +106,7 @@ export function WorktreeSelector({
   const currentWorktree = useAppStore((s) => s.getCurrentWorktree(projectPath));
   const setCurrentWorktree = useAppStore((s) => s.setCurrentWorktree);
   const setWorktreesInStore = useAppStore((s) => s.setWorktrees);
+  const useWorktreesEnabled = useAppStore((s) => s.useWorktrees);
 
   const fetchWorktrees = useCallback(async () => {
     if (!projectPath) return;
@@ -779,6 +780,11 @@ export function WorktreeSelector({
       </div>
     );
   };
+
+  // Don't render the worktree selector if the feature is disabled
+  if (!useWorktreesEnabled) {
+    return null;
+  }
 
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-glass/50 backdrop-blur-sm">

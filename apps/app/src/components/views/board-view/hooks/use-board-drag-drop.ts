@@ -29,7 +29,7 @@ export function useBoardDragDrop({
   onWorktreeCreated,
 }: UseBoardDragDropProps) {
   const [activeFeature, setActiveFeature] = useState<Feature | null>(null);
-  const { moveFeature } = useAppStore();
+  const { moveFeature, useWorktrees } = useAppStore();
 
   /**
    * Get or create the worktree path for a feature based on its branchName.
@@ -157,13 +157,17 @@ export function useBoardDragDrop({
       if (draggedFeature.status === "backlog") {
         // From backlog
         if (targetStatus === "in_progress") {
-          // Get or create worktree based on the feature's assigned branch
-          const worktreePath = await getOrCreateWorktreeForFeature(draggedFeature);
-          if (worktreePath) {
-            await persistFeatureUpdate(featureId, { worktreePath });
+          // Only create worktrees if the feature is enabled
+          let worktreePath: string | null = null;
+          if (useWorktrees) {
+            // Get or create worktree based on the feature's assigned branch
+            worktreePath = await getOrCreateWorktreeForFeature(draggedFeature);
+            if (worktreePath) {
+              await persistFeatureUpdate(featureId, { worktreePath });
+            }
+            // Refresh worktree selector after moving to in_progress
+            onWorktreeCreated?.();
           }
-          // Always refresh worktree selector after moving to in_progress
-          onWorktreeCreated?.();
           // Use helper function to handle concurrency check and start implementation
           // Pass feature with worktreePath so handleRunFeature uses the correct path
           await handleStartImplementation({ ...draggedFeature, worktreePath: worktreePath || undefined });
@@ -278,6 +282,7 @@ export function useBoardDragDrop({
       handleStartImplementation,
       getOrCreateWorktreeForFeature,
       onWorktreeCreated,
+      useWorktrees,
     ]
   );
 

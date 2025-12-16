@@ -143,9 +143,7 @@ export const KanbanCard = memo(function KanbanCard({
   const [agentInfo, setAgentInfo] = useState<AgentTaskInfo | null>(null);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-  const { kanbanCardDetailLevel } = useAppStore();
-
-  const hasWorktree = !!feature.branchName;
+  const { kanbanCardDetailLevel, useWorktrees } = useAppStore();
 
   const showSteps =
     kanbanCardDetailLevel === "standard" ||
@@ -366,99 +364,63 @@ export const KanbanCard = memo(function KanbanCard({
         </div>
       )}
 
-      {/* Skip Tests (Manual) indicator badge */}
-      {feature.skipTests && !feature.error && (
-        <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div
-                className={cn(
-                  "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10",
-                  feature.priority ? "top-11 left-2" : "top-2 left-2",
-                  "bg-[var(--status-warning-bg)] border border-[var(--status-warning)]/40 text-[var(--status-warning)]"
-                )}
-                data-testid={`skip-tests-badge-${feature.id}`}
-              >
-                <Hand className="w-3 h-3" />
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="right" className="text-xs">
-              <p>Manual verification required</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      )}
-
-      {/* Error indicator badge */}
-      {feature.error && (
-        <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div
-                className={cn(
-                  "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10",
-                  feature.priority ? "top-11 left-2" : "top-2 left-2",
-                  "bg-[var(--status-error-bg)] border border-[var(--status-error)]/40 text-[var(--status-error)]"
-                )}
-                data-testid={`error-badge-${feature.id}`}
-              >
-                <AlertCircle className="w-3 h-3" />
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="right" className="text-xs max-w-[250px]">
-              <p>{feature.error}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      )}
-
-      {/* Just Finished indicator badge */}
-      {isJustFinished && (
+      {/* Status badges row */}
+      {(feature.skipTests || feature.error || isJustFinished) && (
         <div
           className={cn(
-            "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10",
-            feature.priority
-              ? "top-11 left-2"
-              : feature.skipTests
-                ? "top-8 left-2"
-                : "top-2 left-2",
-            "bg-[var(--status-success-bg)] border border-[var(--status-success)]/40 text-[var(--status-success)]",
-            "animate-pulse"
+            "absolute left-2 z-10 flex items-center gap-1",
+            feature.priority ? "top-11" : "top-2"
           )}
-          data-testid={`just-finished-badge-${feature.id}`}
-          title="Agent just finished working on this feature"
         >
-          <Sparkles className="w-3 h-3" />
-        </div>
-      )}
+          {/* Skip Tests (Manual) indicator badge */}
+          {feature.skipTests && !feature.error && (
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    className="px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 bg-[var(--status-warning-bg)] border border-[var(--status-warning)]/40 text-[var(--status-warning)]"
+                    data-testid={`skip-tests-badge-${feature.id}`}
+                  >
+                    <Hand className="w-3 h-3" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="right" className="text-xs">
+                  <p>Manual verification required</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
 
-      {/* Branch badge */}
-      {hasWorktree && !isCurrentAutoTask && (
-        <TooltipProvider delayDuration={300}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div
-                className={cn(
-                  "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10 cursor-default",
-                  "bg-[var(--status-info-bg)] border border-[var(--status-info)]/40 text-[var(--status-info)]",
-                  feature.priority
-                    ? "top-11 left-2"
-                    : feature.error || feature.skipTests || isJustFinished
-                      ? "top-8 left-2"
-                      : "top-2 left-2"
-                )}
-                data-testid={`branch-badge-${feature.id}`}
-              >
-                <GitBranch className="w-3 h-3 shrink-0" />
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" className="max-w-[300px]">
-              <p className="font-mono text-xs break-all">
-                {feature.branchName}
-              </p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+          {/* Error indicator badge */}
+          {feature.error && (
+            <TooltipProvider delayDuration={200}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    className="px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 bg-[var(--status-error-bg)] border border-[var(--status-error)]/40 text-[var(--status-error)]"
+                    data-testid={`error-badge-${feature.id}`}
+                  >
+                    <AlertCircle className="w-3 h-3" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="right" className="text-xs max-w-[250px]">
+                  <p>{feature.error}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+
+          {/* Just Finished indicator badge */}
+          {isJustFinished && (
+            <div
+              className="px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 bg-[var(--status-success-bg)] border border-[var(--status-success)]/40 text-[var(--status-success)] animate-pulse"
+              data-testid={`just-finished-badge-${feature.id}`}
+              title="Agent just finished working on this feature"
+            >
+              <Sparkles className="w-3 h-3" />
+            </div>
+          )}
+        </div>
       )}
 
       <CardHeader
@@ -467,10 +429,7 @@ export const KanbanCard = memo(function KanbanCard({
           feature.priority && "pt-12",
           !feature.priority &&
             (feature.skipTests || feature.error || isJustFinished) &&
-            "pt-10",
-          hasWorktree &&
-            (feature.skipTests || feature.error || isJustFinished) &&
-            "pt-14"
+            "pt-10"
         )}
       >
         {isCurrentAutoTask && (
@@ -669,7 +628,7 @@ export const KanbanCard = memo(function KanbanCard({
 
       <CardContent className="p-3 pt-0">
         {/* Target Branch Display */}
-        {feature.branchName && (
+        {useWorktrees && feature.branchName && (
           <div className="mb-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
             <GitBranch className="w-3 h-3 shrink-0" />
             <span className="font-mono truncate" title={feature.branchName}>

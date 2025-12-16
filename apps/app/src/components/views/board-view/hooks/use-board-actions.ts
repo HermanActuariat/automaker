@@ -764,13 +764,17 @@ export function useBoardActions({
     const featuresToStart = backlogFeatures.slice(0, 1);
 
     for (const feature of featuresToStart) {
-      // Get or create worktree based on the feature's assigned branch (same as drag-to-in-progress)
-      const worktreePath = await getOrCreateWorktreeForFeature(feature);
-      if (worktreePath) {
-        await persistFeatureUpdate(feature.id, { worktreePath });
+      // Only create worktrees if the feature is enabled
+      let worktreePath: string | null = null;
+      if (useWorktrees) {
+        // Get or create worktree based on the feature's assigned branch (same as drag-to-in-progress)
+        worktreePath = await getOrCreateWorktreeForFeature(feature);
+        if (worktreePath) {
+          await persistFeatureUpdate(feature.id, { worktreePath });
+        }
+        // Refresh worktree selector after creating worktree
+        onWorktreeCreated?.();
       }
-      // Refresh worktree selector after creating worktree
-      onWorktreeCreated?.();
       // Start the implementation
       // Pass feature with worktreePath so handleRunFeature uses the correct path
       await handleStartImplementation({
@@ -786,6 +790,7 @@ export function useBoardActions({
     persistFeatureUpdate,
     onWorktreeCreated,
     currentWorktreeBranch,
+    useWorktrees,
   ]);
 
   const handleDeleteAllVerified = useCallback(async () => {

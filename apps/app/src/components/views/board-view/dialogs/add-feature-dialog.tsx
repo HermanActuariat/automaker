@@ -108,8 +108,8 @@ export function AddFeatureDialog({
     "improve" | "technical" | "simplify" | "acceptance"
   >("improve");
 
-  // Get enhancement model from store
-  const { enhancementModel } = useAppStore();
+  // Get enhancement model and worktrees setting from store
+  const { enhancementModel, useWorktrees } = useAppStore();
 
   // Sync defaults when dialog opens
   useEffect(() => {
@@ -358,22 +358,24 @@ export function AddFeatureDialog({
                 data-testid="feature-category-input"
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="branch">Target Branch</Label>
-              <BranchAutocomplete
-                value={newFeature.branchName}
-                onChange={(value) =>
-                  setNewFeature({ ...newFeature, branchName: value })
-                }
-                branches={branchSuggestions}
-                placeholder="Select or create branch..."
-                data-testid="feature-branch-input"
-              />
-              <p className="text-xs text-muted-foreground">
-                Work will be done in this branch. A worktree will be created if
-                needed.
-              </p>
-            </div>
+            {useWorktrees && (
+              <div className="space-y-2">
+                <Label htmlFor="branch">Target Branch</Label>
+                <BranchAutocomplete
+                  value={newFeature.branchName}
+                  onChange={(value) =>
+                    setNewFeature({ ...newFeature, branchName: value })
+                  }
+                  branches={branchSuggestions}
+                  placeholder="Select or create branch..."
+                  data-testid="feature-branch-input"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Work will be done in this branch. A worktree will be created if
+                  needed.
+                </p>
+              </div>
+            )}
 
             {/* Priority Selector */}
             <PrioritySelector

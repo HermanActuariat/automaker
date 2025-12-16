@@ -99,8 +99,8 @@ export function EditFeatureDialog({
   >("improve");
   const [showDependencyTree, setShowDependencyTree] = useState(false);
 
-  // Get enhancement model from store
-  const { enhancementModel } = useAppStore();
+  // Get enhancement model and worktrees setting from store
+  const { enhancementModel, useWorktrees } = useAppStore();
 
   useEffect(() => {
     setEditingFeature(feature);
@@ -338,33 +338,35 @@ export function EditFeatureDialog({
                 data-testid="edit-feature-category"
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-branch">Target Branch</Label>
-              <BranchAutocomplete
-                value={editingFeature.branchName ?? "main"}
-                onChange={(value) =>
-                  setEditingFeature({
-                    ...editingFeature,
-                    branchName: value,
-                  })
-                }
-                branches={branchSuggestions}
-                placeholder="Select or create branch..."
-                data-testid="edit-feature-branch"
-                disabled={editingFeature.status !== "backlog"}
-              />
-              {editingFeature.status !== "backlog" && (
-                <p className="text-xs text-muted-foreground">
-                  Branch cannot be changed after work has started.
-                </p>
-              )}
-              {editingFeature.status === "backlog" && (
-                <p className="text-xs text-muted-foreground">
-                  Work will be done in this branch. A worktree will be created
-                  if needed.
-                </p>
-              )}
-            </div>
+            {useWorktrees && (
+              <div className="space-y-2">
+                <Label htmlFor="edit-branch">Target Branch</Label>
+                <BranchAutocomplete
+                  value={editingFeature.branchName ?? "main"}
+                  onChange={(value) =>
+                    setEditingFeature({
+                      ...editingFeature,
+                      branchName: value,
+                    })
+                  }
+                  branches={branchSuggestions}
+                  placeholder="Select or create branch..."
+                  data-testid="edit-feature-branch"
+                  disabled={editingFeature.status !== "backlog"}
+                />
+                {editingFeature.status !== "backlog" && (
+                  <p className="text-xs text-muted-foreground">
+                    Branch cannot be changed after work has started.
+                  </p>
+                )}
+                {editingFeature.status === "backlog" && (
+                  <p className="text-xs text-muted-foreground">
+                    Work will be done in this branch. A worktree will be created
+                    if needed.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Priority Selector */}
             <PrioritySelector
