@@ -1,23 +1,27 @@
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { FlaskConical, Settings2, TestTube, GitBranch } from "lucide-react";
+import { FlaskConical, Settings2, TestTube, GitBranch, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface FeatureDefaultsSectionProps {
   showProfilesOnly: boolean;
   defaultSkipTests: boolean;
+  enableDependencyBlocking: boolean;
   useWorktrees: boolean;
   onShowProfilesOnlyChange: (value: boolean) => void;
   onDefaultSkipTestsChange: (value: boolean) => void;
+  onEnableDependencyBlockingChange: (value: boolean) => void;
   onUseWorktreesChange: (value: boolean) => void;
 }
 
 export function FeatureDefaultsSection({
   showProfilesOnly,
   defaultSkipTests,
+  enableDependencyBlocking,
   useWorktrees,
   onShowProfilesOnlyChange,
   onDefaultSkipTestsChange,
+  onEnableDependencyBlockingChange,
   onUseWorktreesChange,
 }: FeatureDefaultsSectionProps) {
   return (
@@ -95,6 +99,36 @@ export function FeatureDefaultsSection({
             <p className="text-xs text-muted-foreground/80 leading-relaxed">
               When enabled, new features will use TDD with automated tests. When disabled, features will
               require manual verification.
+            </p>
+          </div>
+        </div>
+
+        {/* Separator */}
+        <div className="border-t border-border/30" />
+
+        {/* Dependency Blocking Setting */}
+        <div className="group flex items-start space-x-3 p-3 rounded-xl hover:bg-accent/30 transition-colors duration-200 -mx-3">
+          <Checkbox
+            id="enable-dependency-blocking"
+            checked={enableDependencyBlocking}
+            onCheckedChange={(checked) =>
+              onEnableDependencyBlockingChange(checked === true)
+            }
+            className="mt-1"
+            data-testid="enable-dependency-blocking-checkbox"
+          />
+          <div className="space-y-1.5">
+            <Label
+              htmlFor="enable-dependency-blocking"
+              className="text-foreground cursor-pointer font-medium flex items-center gap-2"
+            >
+              <AlertCircle className="w-4 h-4 text-brand-500" />
+              Enable Dependency Blocking
+            </Label>
+            <p className="text-xs text-muted-foreground/80 leading-relaxed">
+              When enabled, features with incomplete dependencies will show blocked badges
+              and warnings. Auto mode and backlog ordering always respect dependencies
+              regardless of this setting.
             </p>
           </div>
         </div>

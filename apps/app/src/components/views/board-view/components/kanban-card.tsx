@@ -59,9 +59,11 @@ import {
   Brain,
   Wand2,
   Archive,
+  Lock,
 } from "lucide-react";
 import { CountUpTimer } from "@/components/ui/count-up-timer";
 import { getElectronAPI } from "@/lib/electron";
+import { getBlockingDependencies } from "@/lib/dependency-resolver";
 import {
   parseAgentContext,
   AgentTaskInfo,
@@ -150,9 +152,24 @@ export const KanbanCard = memo(function KanbanCard({
   const [agentInfo, setAgentInfo] = useState<AgentTaskInfo | null>(null);
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-  const { kanbanCardDetailLevel } = useAppStore();
+  const { kanbanCardDetailLevel, enableDependencyBlocking, features } = useAppStore();
 
   const hasWorktree = !!feature.branchName;
+
+  // Calculate blocking dependencies (if feature is in backlog and has incomplete dependencies)
+  const blockingDependencies = useMemo(() => {
+    if (!enableDependencyBlocking || feature.status !== "backlog") {
+      return [];
+    }
+    return getBlockingDependencies(feature, features);
+  }, [enableDependencyBlocking, feature, features]);
+
+  // Determine if a badge occupies the top-right position
+  const hasBadgeAtTopRight = useMemo(() => {
+    return feature.status === "backlog" &&
+           !feature.error &&
+           (feature.skipTests || blockingDependencies.length > 0);
+  }, [feature.status, feature.error, feature.skipTests, blockingDependencies.length]);
 
   const showSteps =
     kanbanCardDetailLevel === "standard" ||
@@ -337,7 +354,7 @@ export const KanbanCard = memo(function KanbanCard({
             <TooltipTrigger asChild>
               <div
                 className={cn(
-                  "absolute px-2 py-1 text-sm font-bold rounded-md flex items-center justify-center z-10",
+                  "absolute px-2 py-1 h-8 text-sm font-bold rounded-md flex items-center justify-center z-10",
                   "top-2 left-2 min-w-[36px]",
                   feature.priority === 1 &&
                     "bg-red-500/20 text-red-500 border-2 border-red-500/50",
@@ -373,23 +390,24 @@ export const KanbanCard = memo(function KanbanCard({
         </div>
       )}
 
-      {/* Skip Tests (Manual) indicator badge */}
-      {feature.skipTests && !feature.error && (
+      {/* Skip Tests (Manual) indicator badge - positioned at top right */}
+      {feature.skipTests && !feature.error && feature.status === "backlog" && (
         <TooltipProvider delayDuration={200}>
           <Tooltip>
             <TooltipTrigger asChild>
               <div
                 className={cn(
-                  "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10",
-                  feature.priority ? "top-11 left-2" : "top-2 left-2",
-                  "bg-[var(--status-warning-bg)] border border-[var(--status-warning)]/40 text-[var(--status-warning)]"
+                  "absolute px-2 py-1 h-8 text-sm font-bold rounded-md flex items-center justify-center z-10",
+                  "min-w-[36px]",
+                  "top-2 right-2",
+                  "bg-[var(--status-warning-bg)] border-2 border-[var(--status-warning)]/50 text-[var(--status-warning)]"
                 )}
                 data-testid={`skip-tests-badge-${feature.id}`}
               >
-                <Hand className="w-3 h-3" />
+                <Hand className="w-4 h-4" />
               </div>
             </TooltipTrigger>
-            <TooltipContent side="right" className="text-xs">
+            <TooltipContent side="left" className="text-xs">
               <p>Manual verification required</p>
             </TooltipContent>
           </Tooltip>
@@ -403,17 +421,48 @@ export const KanbanCard = memo(function KanbanCard({
             <TooltipTrigger asChild>
               <div
                 className={cn(
-                  "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10",
+                  "absolute px-2 py-1 text-[11px] font-medium rounded-md flex items-center justify-center z-10",
+                  "min-w-[36px]",
                   feature.priority ? "top-11 left-2" : "top-2 left-2",
                   "bg-[var(--status-error-bg)] border border-[var(--status-error)]/40 text-[var(--status-error)]"
                 )}
                 data-testid={`error-badge-${feature.id}`}
               >
-                <AlertCircle className="w-3 h-3" />
+                <AlertCircle className="w-3.5 h-3.5" />
               </div>
             </TooltipTrigger>
             <TooltipContent side="right" className="text-xs max-w-[250px]">
               <p>{feature.error}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+
+      {/* Blocked by dependencies badge - positioned at top right */}
+      {blockingDependencies.length > 0 && !feature.error && !feature.skipTests && feature.status === "backlog" && (
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div
+                className={cn(
+                  "absolute px-2 py-1 h-8 text-sm font-bold rounded-md flex items-center justify-center z-10",
+                  "min-w-[36px]",
+                  "top-2 right-2",
+                  "bg-orange-500/20 border-2 border-orange-500/50 text-orange-500"
+                )}
+                data-testid={`blocked-badge-${feature.id}`}
+              >
+                <Lock className="w-4 h-4" />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="text-xs max-w-[250px]">
+              <p className="font-medium mb-1">Blocked by {blockingDependencies.length} incomplete {blockingDependencies.length === 1 ? 'dependency' : 'dependencies'}</p>
+              <p className="text-muted-foreground">
+                {blockingDependencies.map(depId => {
+                  const dep = features.find(f => f.id === depId);
+                  return dep?.description || depId;
+                }).join(', ')}
+              </p>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>
@@ -424,11 +473,7 @@ export const KanbanCard = memo(function KanbanCard({
         <div
           className={cn(
             "absolute px-1.5 py-0.5 text-[10px] font-medium rounded-md flex items-center gap-1 z-10",
-            feature.priority
-              ? "top-11 left-2"
-              : feature.skipTests
-                ? "top-8 left-2"
-                : "top-2 left-2",
+            feature.priority ? "top-11 left-2" : "top-2 left-2",
             "bg-[var(--status-success-bg)] border border-[var(--status-success)]/40 text-[var(--status-success)]",
             "animate-pulse"
           )}
@@ -450,7 +495,7 @@ export const KanbanCard = memo(function KanbanCard({
                   "bg-[var(--status-info-bg)] border border-[var(--status-info)]/40 text-[var(--status-info)]",
                   feature.priority
                     ? "top-11 left-2"
-                    : feature.error || feature.skipTests || isJustFinished
+                    : feature.error || isJustFinished
                       ? "top-8 left-2"
                       : "top-2 left-2"
                 )}
@@ -473,10 +518,10 @@ export const KanbanCard = memo(function KanbanCard({
           "p-3 pb-2 block",
           feature.priority && "pt-12",
           !feature.priority &&
-            (feature.skipTests || feature.error || isJustFinished) &&
+            (feature.error || isJustFinished) &&
             "pt-10",
           hasWorktree &&
-            (feature.skipTests || feature.error || isJustFinished) &&
+            (feature.error || isJustFinished) &&
             "pt-14"
         )}
       >
@@ -495,7 +540,7 @@ export const KanbanCard = memo(function KanbanCard({
           </div>
         )}
         {!isCurrentAutoTask && feature.status === "backlog" && (
-          <div className="absolute top-2 right-2">
+          <div className="absolute bottom-1 right-2">
             <Button
               variant="ghost"
               size="sm"
@@ -514,43 +559,110 @@ export const KanbanCard = memo(function KanbanCard({
         {!isCurrentAutoTask &&
           (feature.status === "waiting_approval" ||
             feature.status === "verified") && (
-            <div className="absolute top-2 right-2 flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 w-6 p-0 hover:bg-white/10 text-muted-foreground hover:text-foreground"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onEdit();
-                }}
-                onPointerDown={(e) => e.stopPropagation()}
-                data-testid={`edit-${
-                  feature.status === "waiting_approval" ? "waiting" : "verified"
-                }-${feature.id}`}
-                title="Edit"
-              >
-                <Edit className="w-4 h-4" />
-              </Button>
-              {onViewOutput && (
+            <>
+              <div className="absolute top-2 right-2 flex items-center gap-1">
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-6 w-6 p-0 hover:bg-white/10 text-muted-foreground hover:text-foreground"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onViewOutput();
+                    onEdit();
                   }}
                   onPointerDown={(e) => e.stopPropagation()}
-                  data-testid={`logs-${
-                    feature.status === "waiting_approval"
-                      ? "waiting"
-                      : "verified"
+                  data-testid={`edit-${
+                    feature.status === "waiting_approval" ? "waiting" : "verified"
                   }-${feature.id}`}
-                  title="Logs"
+                  title="Edit"
                 >
-                  <FileText className="w-4 h-4" />
+                  <Edit className="w-4 h-4" />
                 </Button>
-              )}
+                {onViewOutput && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0 hover:bg-white/10 text-muted-foreground hover:text-foreground"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onViewOutput();
+                    }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    data-testid={`logs-${
+                      feature.status === "waiting_approval"
+                        ? "waiting"
+                        : "verified"
+                    }-${feature.id}`}
+                    title="Logs"
+                  >
+                    <FileText className="w-4 h-4" />
+                  </Button>
+                )}
+              </div>
+              <div className="absolute bottom-1 right-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0 hover:bg-white/10 text-muted-foreground hover:text-destructive"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteClick(e);
+                  }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  data-testid={`delete-${
+                    feature.status === "waiting_approval" ? "waiting" : "verified"
+                  }-${feature.id}`}
+                  title="Delete"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </div>
+            </>
+          )}
+        {!isCurrentAutoTask && feature.status === "in_progress" && (
+          <>
+            <div className="absolute top-2 right-2">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 w-6 p-0 hover:bg-muted/80 rounded-md"
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    data-testid={`menu-${feature.id}`}
+                  >
+                    <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-36">
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEdit();
+                    }}
+                    data-testid={`edit-feature-${feature.id}`}
+                    className="text-xs"
+                  >
+                    <Edit className="w-3 h-3 mr-2" />
+                    Edit
+                  </DropdownMenuItem>
+                  {onViewOutput && (
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onViewOutput();
+                      }}
+                      data-testid={`view-logs-${feature.id}`}
+                      className="text-xs"
+                    >
+                      <FileText className="w-3 h-3 mr-2" />
+                      View Logs
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+            <div className="absolute bottom-1 right-2">
               <Button
                 variant="ghost"
                 size="sm"
@@ -560,69 +672,13 @@ export const KanbanCard = memo(function KanbanCard({
                   handleDeleteClick(e);
                 }}
                 onPointerDown={(e) => e.stopPropagation()}
-                data-testid={`delete-${
-                  feature.status === "waiting_approval" ? "waiting" : "verified"
-                }-${feature.id}`}
+                data-testid={`delete-feature-${feature.id}`}
                 title="Delete"
               >
                 <Trash2 className="w-4 h-4" />
               </Button>
             </div>
-          )}
-        {!isCurrentAutoTask && feature.status === "in_progress" && (
-          <div className="absolute top-2 right-2">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 w-6 p-0 hover:bg-muted/80 rounded-md"
-                  onClick={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  data-testid={`menu-${feature.id}`}
-                >
-                  <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-36">
-                <DropdownMenuItem
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onEdit();
-                  }}
-                  data-testid={`edit-feature-${feature.id}`}
-                  className="text-xs"
-                >
-                  <Edit className="w-3 h-3 mr-2" />
-                  Edit
-                </DropdownMenuItem>
-                {onViewOutput && (
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onViewOutput();
-                    }}
-                    data-testid={`view-logs-${feature.id}`}
-                    className="text-xs"
-                  >
-                    <FileText className="w-3 h-3 mr-2" />
-                    View Logs
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  className="text-xs text-destructive focus:text-destructive"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteClick(e as unknown as React.MouseEvent);
-                  }}
-                  data-testid={`delete-feature-${feature.id}`}
-                >
-                  <Trash2 className="w-3 h-3 mr-2" />
-                  Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
+          </>
         )}
         <div className="flex items-start gap-2">
           {isDraggable && (

@@ -1,5 +1,6 @@
 import { useMemo, useCallback } from "react";
 import { Feature } from "@/store/app-store";
+import { resolveDependencies } from "@/lib/dependency-resolver";
 
 type ColumnId = Feature["status"];
 
@@ -51,12 +52,13 @@ export function useBoardColumnFeatures({
       }
     });
 
-    // Sort backlog by priority: 1 (high) -> 2 (medium) -> 3 (low) -> no priority
-    map.backlog.sort((a, b) => {
-      const aPriority = a.priority ?? 999; // Features without priority go last
-      const bPriority = b.priority ?? 999;
-      return aPriority - bPriority;
-    });
+    // Apply dependency-aware sorting to backlog
+    // This ensures features appear in dependency order (dependencies before dependents)
+    // Within the same dependency level, features are sorted by priority
+    if (map.backlog.length > 0) {
+      const { orderedFeatures } = resolveDependencies(map.backlog);
+      map.backlog = orderedFeatures;
+    }
 
     return map;
   }, [features, runningAutoTasks, searchQuery]);
