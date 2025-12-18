@@ -14,8 +14,6 @@ interface UseBoardDragDropProps {
     updates: Partial<Feature>
   ) => Promise<void>;
   handleStartImplementation: (feature: Feature) => Promise<boolean>;
-  projectPath: string | null; // Main project path
-  onWorktreeCreated?: () => void; // Callback when a new worktree is created
 }
 
 export function useBoardDragDrop({
@@ -24,8 +22,6 @@ export function useBoardDragDrop({
   runningAutoTasks,
   persistFeatureUpdate,
   handleStartImplementation,
-  projectPath,
-  onWorktreeCreated,
 }: UseBoardDragDropProps) {
   const [activeFeature, setActiveFeature] = useState<Feature | null>(null);
   const { moveFeature } = useAppStore();

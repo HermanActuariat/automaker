@@ -412,6 +412,12 @@ export function BoardView() {
     autoModeRunningRef.current = autoMode.isRunning;
   }, [autoMode.isRunning]);
 
+  // Use a ref to track the latest features to avoid effect re-runs when features change
+  const hookFeaturesRef = useRef(hookFeatures);
+  useEffect(() => {
+    hookFeaturesRef.current = hookFeatures;
+  }, [hookFeatures]);
+
   // Track features that are pending (started but not yet confirmed running)
   const pendingFeaturesRef = useRef<Set<string>>(new Set());
 
@@ -489,33 +495,30 @@ export function BoardView() {
         }
 
         // Filter backlog features by the currently selected worktree branch
-        const primaryBranch = currentProject.path
-          ? getPrimaryWorktreeBranch(currentProject.path)
-          : null;
-        const backlogFeatures = hookFeatures.filter((f) => {
+        // This logic mirrors use-board-column-features.ts for consistency
+        // Use ref to get the latest features without causing effect re-runs
+        const currentFeatures = hookFeaturesRef.current;
+        const backlogFeatures = currentFeatures.filter((f) => {
           if (f.status !== "backlog") return false;
 
-          // Determine the feature's branch (default to primary branch if not set)
-          const featureBranch = f.branchName || primaryBranch || "main";
+          const featureBranch = f.branchName;
 
-          // If no worktree is selected (currentWorktreeBranch is null or matches primary),
-          // show features with no branch or primary branch
-          if (
-            !currentWorktreeBranch ||
-            (currentProject.path &&
-              isPrimaryWorktreeBranch(
-                currentProject.path,
-                currentWorktreeBranch
-              ))
-          ) {
-            return (
-              !f.branchName ||
-              (currentProject.path &&
-                isPrimaryWorktreeBranch(currentProject.path, featureBranch))
-            );
+          // Features without branchName are considered unassigned (show only on primary worktree)
+          if (!featureBranch) {
+            // No branch assigned - show only when viewing primary worktree
+            const isViewingPrimary = currentWorktreePath === null;
+            return isViewingPrimary;
           }
 
-          // Otherwise, only show features matching the selected worktree branch
+          if (currentWorktreeBranch === null) {
+            // We're viewing main but branch hasn't been initialized yet
+            // Show features assigned to primary worktree's branch
+            return currentProject.path
+              ? isPrimaryWorktreeBranch(currentProject.path, featureBranch)
+              : false;
+          }
+
+          // Match by branch name
           return featureBranch === currentWorktreeBranch;
         });
 
@@ -531,7 +534,7 @@ export function BoardView() {
         // Filter out features with blocking dependencies if dependency blocking is enabled
         const eligibleFeatures = enableDependencyBlocking
           ? sortedBacklog.filter((f) => {
-              const blockingDeps = getBlockingDependencies(f, hookFeatures);
+              const blockingDeps = getBlockingDependencies(f, currentFeatures);
               return blockingDeps.length === 0;
             })
           : sortedBacklog;
@@ -591,7 +594,7 @@ export function BoardView() {
     currentProject,
     runningAutoTasks,
     maxConcurrency,
-    hookFeatures,
+    // hookFeatures is accessed via hookFeaturesRef to prevent effect re-runs
     currentWorktreeBranch,
     currentWorktreePath,
     getPrimaryWorktreeBranch,
@@ -617,8 +620,6 @@ export function BoardView() {
     runningAutoTasks,
     persistFeatureUpdate,
     handleStartImplementation,
-    projectPath: currentProject?.path || null,
-    onWorktreeCreated: () => setWorktreeRefreshKey((k) => k + 1),
   });
 
   // Use column features hook

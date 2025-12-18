@@ -98,7 +98,9 @@ export function useBoardColumnFeatures({
           }
         } else {
           // Unknown status, default to backlog
-          map.backlog.push(f);
+          if (matchesWorktree) {
+            map.backlog.push(f);
+          }
         }
       }
     });

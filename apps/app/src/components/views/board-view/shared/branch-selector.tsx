@@ -3,7 +3,6 @@
 import { Label } from "@/components/ui/label";
 import { BranchAutocomplete } from "@/components/ui/branch-autocomplete";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { cn } from "@/lib/utils";
 
 interface BranchSelectorProps {
   useCurrentBranch: boolean;
@@ -32,12 +31,13 @@ export function BranchSelector({
 
   return (
     <div className="space-y-2">
-      <Label htmlFor={`${testIdPrefix}-selector`}>Target Branch</Label>
+      <Label id={`${testIdPrefix}-label`}>Target Branch</Label>
       <RadioGroup
         value={useCurrentBranch ? "current" : "other"}
         onValueChange={(value: string) => onUseCurrentBranchChange(value === "current")}
         disabled={disabled}
         data-testid={`${testIdPrefix}-radio-group`}
+        aria-labelledby={`${testIdPrefix}-label`}
       >
         <div className="flex items-center space-x-2">
           <RadioGroupItem value="current" id={`${testIdPrefix}-current`} />

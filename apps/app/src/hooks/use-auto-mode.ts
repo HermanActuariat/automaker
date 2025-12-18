@@ -327,7 +327,6 @@ export function useAutoMode() {
     projectId,
     addRunningTask,
     removeRunningTask,
-    setAutoModeRunning,
     addAutoModeActivity,
     getProjectIdFromPath,
     setPendingPlanApproval,

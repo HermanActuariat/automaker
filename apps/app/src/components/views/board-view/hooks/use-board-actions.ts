@@ -103,10 +103,7 @@ export function useBoardActions({
       // Simplified: Only store branchName, no worktree creation on add
       // Worktrees are created at execution time (when feature starts)
       // Empty string means user chose "use current branch" - don't save a branch name
-      const finalBranchName =
-        featureData.branchName === ""
-          ? undefined
-          : featureData.branchName || undefined;
+      const finalBranchName = featureData.branchName || undefined;
 
       const newFeatureData = {
         ...featureData,
@@ -139,8 +136,7 @@ export function useBoardActions({
         requirePlanApproval?: boolean;
       }
     ) => {
-      const finalBranchName =
-        updates.branchName === "" ? undefined : updates.branchName || undefined;
+      const finalBranchName = updates.branchName || undefined;
 
       const finalUpdates = {
         ...updates,

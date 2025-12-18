@@ -14,7 +14,6 @@ import { Button } from "@/components/ui/button";
 import { HotkeyButton } from "@/components/ui/hotkey-button";
 import { Label } from "@/components/ui/label";
 import { CategoryAutocomplete } from "@/components/ui/category-autocomplete";
-import { BranchAutocomplete } from "@/components/ui/branch-autocomplete";
 import {
   DescriptionImageDropZone,
   FeatureImagePath as DescriptionImagePath,

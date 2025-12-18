@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -49,6 +49,8 @@ export function CreatePRDialog({
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [showBrowserFallback, setShowBrowserFallback] = useState(false);
+  // Track whether an operation completed that warrants a refresh
+  const operationCompletedRef = useRef(false);
 
   // Reset state when dialog opens or worktree changes
   useEffect(() => {
@@ -65,6 +67,8 @@ export function CreatePRDialog({
       setPrUrl(null);
       setBrowserUrl(null);
       setShowBrowserFallback(false);
+      // Reset operation tracking
+      operationCompletedRef.current = false;
     } else {
       // Reset everything when dialog closes
       setTitle("");
@@ -76,6 +80,7 @@ export function CreatePRDialog({
       setPrUrl(null);
       setBrowserUrl(null);
       setShowBrowserFallback(false);
+      operationCompletedRef.current = false;
     }
   }, [open, worktree?.path]);
 
@@ -102,6 +107,8 @@ export function CreatePRDialog({
       if (result.success && result.result) {
         if (result.result.prCreated && result.result.prUrl) {
           setPrUrl(result.result.prUrl);
+          // Mark operation as completed for refresh on close
+          operationCompletedRef.current = true;
           toast.success("Pull request created!", {
             description: `PR created from ${result.result.branch}`,
             action: {
@@ -122,6 +129,8 @@ export function CreatePRDialog({
             if (prError === "gh_cli_not_available" || !result.result.ghCliAvailable) {
               setBrowserUrl(result.result.browserUrl ?? null);
               setShowBrowserFallback(true);
+              // Mark operation as completed - branch was pushed successfully
+              operationCompletedRef.current = true;
               toast.success("Branch pushed", {
                 description: result.result.committed
                   ? `Commit ${result.result.commitHash} pushed to ${result.result.branch}`
@@ -147,6 +156,8 @@ export function CreatePRDialog({
               // Show error but also provide browser option
               setBrowserUrl(result.result.browserUrl ?? null);
               setShowBrowserFallback(true);
+              // Mark operation as completed - branch was pushed even though PR creation failed
+              operationCompletedRef.current = true;
               toast.error("PR creation failed", {
                 description: errorMessage,
                 duration: 8000,
@@ -187,22 +198,13 @@ export function CreatePRDialog({
   };
 
   const handleClose = () => {
-    // Call onCreated() to refresh worktrees when dialog closes
-    // This ensures the worktree list is updated after any operation
-    onCreated();
+    // Only call onCreated() if an actual operation completed
+    // This prevents unnecessary refreshes when user cancels
+    if (operationCompletedRef.current) {
+      onCreated();
+    }
     onOpenChange(false);
-    // Reset state after dialog closes
-    setTimeout(() => {
-      setTitle("");
-      setBody("");
-      setCommitMessage("");
-      setBaseBranch("main");
-      setIsDraft(false);
-      setError(null);
-      setPrUrl(null);
-      setBrowserUrl(null);
-      setShowBrowserFallback(false);
-    }, 200);
+    // State reset is handled by useEffect when open becomes false
   };
 
   if (!worktree) return null;
