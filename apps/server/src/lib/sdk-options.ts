@@ -216,7 +216,7 @@ export function createSuggestionsOptions(
   return {
     ...getBaseOptions(),
     model: getModelForUseCase("suggestions", config.model),
-    maxTurns: MAX_TURNS.extended, // Increased from quick (5) to standard (20) to allow codebase exploration + structured output
+    maxTurns: MAX_TURNS.extended,
     cwd: config.cwd,
     allowedTools: [...TOOL_PRESETS.readOnly],
     ...(config.systemPrompt && { systemPrompt: config.systemPrompt }),
