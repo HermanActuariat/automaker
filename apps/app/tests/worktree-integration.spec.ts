@@ -2414,8 +2414,12 @@ test.describe("Worktree Integration Tests", () => {
     const editDialog = page.locator('[data-testid="edit-feature-dialog"]');
     await expect(editDialog).toBeVisible({ timeout: 5000 });
 
+    // Select "Other branch" to enable the branch input
+    const otherBranchRadio = page.locator('label[for="edit-feature-other"]');
+    await otherBranchRadio.click();
+
     // Find and click on the branch input to open the autocomplete
-    const branchInput = page.locator('[data-testid="edit-feature-branch"]');
+    const branchInput = page.locator('[data-testid="edit-feature-input"]');
     await branchInput.click();
     await page.waitForTimeout(300);
 
@@ -2509,7 +2513,7 @@ test.describe("Worktree Integration Tests", () => {
     await expect(editDialog).toBeVisible({ timeout: 5000 });
 
     // Find and click on the branch input
-    const branchInput = page.locator('[data-testid="edit-feature-branch"]');
+    const branchInput = page.locator('[data-testid="edit-feature-input"]');
     await branchInput.click();
     await page.waitForTimeout(300);
 
@@ -2568,7 +2572,7 @@ test.describe("Worktree Integration Tests", () => {
     await expect(editDialog).toBeVisible({ timeout: 5000 });
 
     // Change to the existing branch
-    const branchInput = page.locator('[data-testid="edit-feature-branch"]');
+    const branchInput = page.locator('[data-testid="edit-feature-input"]');
     await branchInput.click();
     await page.waitForTimeout(300);
 
