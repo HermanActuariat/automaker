@@ -324,9 +324,9 @@ describe("auto-mode-service.ts - Planning Mode", () => {
   describe("status management", () => {
     it("should report correct status", () => {
       const status = service.getStatus();
-      expect(status.autoLoopRunning).toBe(false);
       expect(status.runningFeatures).toEqual([]);
       expect(status.isRunning).toBe(false);
+      expect(status.runningCount).toBe(0);
     });
   });
 });
