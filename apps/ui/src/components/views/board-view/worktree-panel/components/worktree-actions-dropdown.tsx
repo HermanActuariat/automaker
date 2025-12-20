@@ -20,6 +20,7 @@ import {
   Square,
   Globe,
   MessageSquare,
+  GitMerge,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { WorktreeInfo, DevServerInfo, PRInfo } from "../types";
@@ -42,6 +43,7 @@ interface WorktreeActionsDropdownProps {
   onCommit: (worktree: WorktreeInfo) => void;
   onCreatePR: (worktree: WorktreeInfo) => void;
   onAddressPRComments: (worktree: WorktreeInfo, prInfo: PRInfo) => void;
+  onResolveConflicts: (worktree: WorktreeInfo) => void;
   onDeleteWorktree: (worktree: WorktreeInfo) => void;
   onStartDevServer: (worktree: WorktreeInfo) => void;
   onStopDevServer: (worktree: WorktreeInfo) => void;
@@ -66,6 +68,7 @@ export function WorktreeActionsDropdown({
   onCommit,
   onCreatePR,
   onAddressPRComments,
+  onResolveConflicts,
   onDeleteWorktree,
   onStartDevServer,
   onStopDevServer,
@@ -160,6 +163,15 @@ export function WorktreeActionsDropdown({
             </span>
           )}
         </DropdownMenuItem>
+        {!worktree.isMain && (
+          <DropdownMenuItem
+            onClick={() => onResolveConflicts(worktree)}
+            className="text-xs text-purple-500 focus:text-purple-600"
+          >
+            <GitMerge className="w-3.5 h-3.5 mr-2" />
+            Pull & Resolve Conflicts
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onClick={() => onOpenInEditor(worktree)}

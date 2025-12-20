@@ -89,6 +89,7 @@ export function useBoardActions({
 
   const handleAddFeature = useCallback(
     async (featureData: {
+      title: string;
       category: string;
       description: string;
       steps: string[];
@@ -148,8 +149,14 @@ export function useBoardActions({
         }
       }
 
+      // Check if we need to generate a title
+      const needsTitleGeneration =
+        !featureData.title.trim() && featureData.description.trim();
+
       const newFeatureData = {
         ...featureData,
+        title: featureData.title,
+        titleGenerating: needsTitleGeneration,
         status: "backlog" as const,
         branchName: finalBranchName,
       };
@@ -157,14 +164,56 @@ export function useBoardActions({
       // Must await to ensure feature exists on server before user can drag it
       await persistFeatureCreate(createdFeature);
       saveCategory(featureData.category);
+
+      // Generate title in the background if needed (non-blocking)
+      if (needsTitleGeneration) {
+        const api = getElectronAPI();
+        if (api?.features?.generateTitle) {
+          api.features
+            .generateTitle(featureData.description)
+            .then((result) => {
+              if (result.success && result.title) {
+                const titleUpdates = {
+                  title: result.title,
+                  titleGenerating: false,
+                };
+                updateFeature(createdFeature.id, titleUpdates);
+                persistFeatureUpdate(createdFeature.id, titleUpdates);
+              } else {
+                // Clear generating flag even if failed
+                const titleUpdates = { titleGenerating: false };
+                updateFeature(createdFeature.id, titleUpdates);
+                persistFeatureUpdate(createdFeature.id, titleUpdates);
+              }
+            })
+            .catch((error) => {
+              console.error("[Board] Error generating title:", error);
+              // Clear generating flag on error
+              const titleUpdates = { titleGenerating: false };
+              updateFeature(createdFeature.id, titleUpdates);
+              persistFeatureUpdate(createdFeature.id, titleUpdates);
+            });
+        }
+      }
     },
-    [addFeature, persistFeatureCreate, saveCategory, useWorktrees, currentProject, onWorktreeCreated, onWorktreeAutoSelect]
+    [
+      addFeature,
+      persistFeatureCreate,
+      persistFeatureUpdate,
+      updateFeature,
+      saveCategory,
+      useWorktrees,
+      currentProject,
+      onWorktreeCreated,
+      onWorktreeAutoSelect,
+    ]
   );
 
   const handleUpdateFeature = useCallback(
     async (
       featureId: string,
       updates: {
+        title: string;
         category: string;
         description: string;
         steps: string[];
@@ -219,6 +268,7 @@ export function useBoardActions({
 
       const finalUpdates = {
         ...updates,
+        title: updates.title,
         branchName: finalBranchName,
       };
 
@@ -229,7 +279,15 @@ export function useBoardActions({
       }
       setEditingFeature(null);
     },
-    [updateFeature, persistFeatureUpdate, saveCategory, setEditingFeature, useWorktrees, currentProject, onWorktreeCreated]
+    [
+      updateFeature,
+      persistFeatureUpdate,
+      saveCategory,
+      setEditingFeature,
+      useWorktrees,
+      currentProject,
+      onWorktreeCreated,
+    ]
   );
 
   const handleDeleteFeature = useCallback(

@@ -495,6 +495,47 @@ export function BoardView() {
     [handleAddFeature, handleStartImplementation, defaultSkipTests]
   );
 
+  // Handler for resolving conflicts - creates a feature to pull from origin/main and resolve conflicts
+  const handleResolveConflicts = useCallback(
+    async (worktree: WorktreeInfo) => {
+      const description = `Pull latest from origin/main and resolve conflicts. Merge origin/main into the current branch (${worktree.branch}), resolving any merge conflicts that arise. After resolving conflicts, ensure the code compiles and tests pass.`;
+
+      // Create the feature
+      const featureData = {
+        category: "Maintenance",
+        description,
+        steps: [],
+        images: [],
+        imagePaths: [],
+        skipTests: defaultSkipTests,
+        model: "opus" as const,
+        thinkingLevel: "none" as const,
+        branchName: worktree.branch,
+        priority: 1, // High priority for conflict resolution
+        planningMode: "skip" as const,
+        requirePlanApproval: false,
+      };
+
+      await handleAddFeature(featureData);
+
+      // Find the newly created feature and start it
+      setTimeout(async () => {
+        const latestFeatures = useAppStore.getState().features;
+        const newFeature = latestFeatures.find(
+          (f) =>
+            f.branchName === worktree.branch &&
+            f.status === "backlog" &&
+            f.description.includes("Pull latest from origin/main")
+        );
+
+        if (newFeature) {
+          await handleStartImplementation(newFeature);
+        }
+      }, FEATURE_CREATION_SETTLE_DELAY_MS);
+    },
+    [handleAddFeature, handleStartImplementation, defaultSkipTests]
+  );
+
   // Client-side auto mode: periodically check for backlog items and move them to in-progress
   // Use a ref to track the latest auto mode state so async operations always check the current value
   const autoModeRunningRef = useRef(autoMode.isRunning);
@@ -915,6 +956,7 @@ export function BoardView() {
       <BoardHeader
         projectName={currentProject.name}
         maxConcurrency={maxConcurrency}
+        runningAgentsCount={runningAutoTasks.length}
         onConcurrencyChange={setMaxConcurrency}
         isAutoModeRunning={autoMode.isRunning}
         onAutoModeToggle={(enabled) => {
@@ -955,6 +997,7 @@ export function BoardView() {
           setShowCreateBranchDialog(true);
         }}
         onAddressPRComments={handleAddressPRComments}
+        onResolveConflicts={handleResolveConflicts}
         onRemovedWorktrees={handleRemovedWorktrees}
         runningFeatureIds={runningAutoTasks}
         branchCardCounts={branchCardCounts}

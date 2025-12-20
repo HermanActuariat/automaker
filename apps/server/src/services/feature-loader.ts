@@ -14,6 +14,8 @@ import {
 
 export interface Feature {
   id: string;
+  title?: string;
+  titleGenerating?: boolean;
   category: string;
   description: string;
   steps?: string[];

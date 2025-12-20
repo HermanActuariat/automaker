@@ -11,6 +11,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { HotkeyButton } from "@/components/ui/hotkey-button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CategoryAutocomplete } from "@/components/ui/category-autocomplete";
 import {
@@ -61,6 +62,7 @@ interface EditFeatureDialogProps {
   onUpdate: (
     featureId: string,
     updates: {
+      title: string;
       category: string;
       description: string;
       steps: string[];
@@ -159,6 +161,7 @@ export function EditFeatureDialog({
       : editingFeature.branchName || "";
 
     const updates = {
+      title: editingFeature.title ?? "",
       category: editingFeature.category,
       description: editingFeature.description,
       steps: editingFeature.steps,
@@ -309,6 +312,21 @@ export function EditFeatureDialog({
                 previewMap={editFeaturePreviewMap}
                 onPreviewMapChange={setEditFeaturePreviewMap}
                 data-testid="edit-feature-description"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-title">Title (optional)</Label>
+              <Input
+                id="edit-title"
+                value={editingFeature.title ?? ""}
+                onChange={(e) =>
+                  setEditingFeature({
+                    ...editingFeature,
+                    title: e.target.value,
+                  })
+                }
+                placeholder="Leave blank to auto-generate"
+                data-testid="edit-feature-title"
               />
             </div>
             <div className="flex w-fit items-center gap-3 select-none cursor-default">

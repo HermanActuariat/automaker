@@ -67,6 +67,7 @@ export interface WorktreePanelProps {
   onCreatePR: (worktree: WorktreeInfo) => void;
   onCreateBranch: (worktree: WorktreeInfo) => void;
   onAddressPRComments: (worktree: WorktreeInfo, prInfo: PRInfo) => void;
+  onResolveConflicts: (worktree: WorktreeInfo) => void;
   onRemovedWorktrees?: (removedWorktrees: Array<{ path: string; branch: string }>) => void;
   runningFeatureIds?: string[];
   features?: FeatureInfo[];

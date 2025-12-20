@@ -4,12 +4,13 @@ import { HotkeyButton } from "@/components/ui/hotkey-button";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Plus, Users } from "lucide-react";
+import { Plus, Bot } from "lucide-react";
 import { KeyboardShortcut } from "@/hooks/use-keyboard-shortcuts";
 
 interface BoardHeaderProps {
   projectName: string;
   maxConcurrency: number;
+  runningAgentsCount: number;
   onConcurrencyChange: (value: number) => void;
   isAutoModeRunning: boolean;
   onAutoModeToggle: (enabled: boolean) => void;
@@ -21,6 +22,7 @@ interface BoardHeaderProps {
 export function BoardHeader({
   projectName,
   maxConcurrency,
+  runningAgentsCount,
   onConcurrencyChange,
   isAutoModeRunning,
   onAutoModeToggle,
@@ -41,7 +43,8 @@ export function BoardHeader({
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-secondary border border-border"
             data-testid="concurrency-slider-container"
           >
-            <Users className="w-4 h-4 text-muted-foreground" />
+            <Bot className="w-4 h-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Agents</span>
             <Slider
               value={[maxConcurrency]}
               onValueChange={(value) => onConcurrencyChange(value[0])}
@@ -52,10 +55,10 @@ export function BoardHeader({
               data-testid="concurrency-slider"
             />
             <span
-              className="text-sm text-muted-foreground min-w-[2ch] text-center"
+              className="text-sm text-muted-foreground min-w-[5ch] text-center"
               data-testid="concurrency-value"
             >
-              {maxConcurrency}
+              {runningAgentsCount} / {maxConcurrency}
             </span>
           </div>
         )}

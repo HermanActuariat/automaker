@@ -11,6 +11,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { HotkeyButton } from "@/components/ui/hotkey-button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CategoryAutocomplete } from "@/components/ui/category-autocomplete";
 import {
@@ -58,6 +59,7 @@ interface AddFeatureDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onAdd: (feature: {
+    title: string;
     category: string;
     description: string;
     steps: string[];
@@ -99,6 +101,7 @@ export function AddFeatureDialog({
   const navigate = useNavigate();
   const [useCurrentBranch, setUseCurrentBranch] = useState(true);
   const [newFeature, setNewFeature] = useState({
+    title: "",
     category: "",
     description: "",
     steps: [""],
@@ -186,6 +189,7 @@ export function AddFeatureDialog({
       : newFeature.branchName || "";
 
     onAdd({
+      title: newFeature.title,
       category,
       description: newFeature.description,
       steps: newFeature.steps.filter((s) => s.trim()),
@@ -202,6 +206,7 @@ export function AddFeatureDialog({
 
     // Reset form
     setNewFeature({
+      title: "",
       category: "",
       description: "",
       steps: [""],
@@ -348,6 +353,17 @@ export function AddFeatureDialog({
                 onPreviewMapChange={setNewFeaturePreviewMap}
                 autoFocus
                 error={descriptionError}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="title">Title (optional)</Label>
+              <Input
+                id="title"
+                value={newFeature.title}
+                onChange={(e) =>
+                  setNewFeature({ ...newFeature, title: e.target.value })
+                }
+                placeholder="Leave blank to auto-generate"
               />
             </div>
             <div className="flex w-fit items-center gap-3 select-none cursor-default">

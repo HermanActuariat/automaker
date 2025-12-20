@@ -57,3 +57,22 @@ export async function getCategoryOption(
     .replace(/\s+/g, "-")}`;
   return page.locator(`[data-testid="${optionTestId}"]`);
 }
+
+/**
+ * Click the "Create new" option for a category that doesn't exist
+ */
+export async function clickCreateNewCategoryOption(
+  page: Page
+): Promise<void> {
+  const option = page.locator('[data-testid="category-option-create-new"]');
+  await option.click();
+}
+
+/**
+ * Get the "Create new" option element for categories
+ */
+export async function getCreateNewCategoryOption(
+  page: Page
+): Promise<Locator> {
+  return page.locator('[data-testid="category-option-create-new"]');
+}

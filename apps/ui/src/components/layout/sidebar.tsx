@@ -1029,12 +1029,6 @@ export function Sidebar() {
         icon: UserCircle,
         shortcut: shortcuts.profiles,
       },
-      {
-        id: "terminal",
-        label: "Terminal",
-        icon: Terminal,
-        shortcut: shortcuts.terminal,
-      },
     ];
 
     // Filter out hidden items
@@ -1048,29 +1042,39 @@ export function Sidebar() {
       if (item.id === "profiles" && hideAiProfiles) {
         return false;
       }
-      if (item.id === "terminal" && hideTerminal) {
-        return false;
-      }
       return true;
     });
+
+    // Build project items - Terminal is conditionally included
+    const projectItems: NavItem[] = [
+      {
+        id: "board",
+        label: "Kanban Board",
+        icon: LayoutGrid,
+        shortcut: shortcuts.board,
+      },
+      {
+        id: "agent",
+        label: "Agent Runner",
+        icon: Bot,
+        shortcut: shortcuts.agent,
+      },
+    ];
+
+    // Add Terminal to Project section if not hidden
+    if (!hideTerminal) {
+      projectItems.push({
+        id: "terminal",
+        label: "Terminal",
+        icon: Terminal,
+        shortcut: shortcuts.terminal,
+      });
+    }
 
     return [
       {
         label: "Project",
-        items: [
-          {
-            id: "board",
-            label: "Kanban Board",
-            icon: LayoutGrid,
-            shortcut: shortcuts.board,
-          },
-          {
-            id: "agent",
-            label: "Agent Runner",
-            icon: Bot,
-            shortcut: shortcuts.agent,
-          },
-        ],
+        items: projectItems,
       },
       {
         label: "Tools",

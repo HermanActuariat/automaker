@@ -10,6 +10,7 @@ import { createCreateHandler } from "./routes/create.js";
 import { createUpdateHandler } from "./routes/update.js";
 import { createDeleteHandler } from "./routes/delete.js";
 import { createAgentOutputHandler } from "./routes/agent-output.js";
+import { createGenerateTitleHandler } from "./routes/generate-title.js";
 
 export function createFeaturesRoutes(featureLoader: FeatureLoader): Router {
   const router = Router();
@@ -20,6 +21,7 @@ export function createFeaturesRoutes(featureLoader: FeatureLoader): Router {
   router.post("/update", createUpdateHandler(featureLoader));
   router.post("/delete", createDeleteHandler(featureLoader));
   router.post("/agent-output", createAgentOutputHandler(featureLoader));
+  router.post("/generate-title", createGenerateTitleHandler());
 
   return router;
 }
