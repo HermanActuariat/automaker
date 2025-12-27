@@ -10,6 +10,7 @@ import { SettingsNavigation } from './settings-view/components/settings-navigati
 import { ApiKeysSection } from './settings-view/api-keys/api-keys-section';
 import { ClaudeUsageSection } from './settings-view/api-keys/claude-usage-section';
 import { ClaudeCliStatus } from './settings-view/cli-status/claude-cli-status';
+import { ClaudeMdSettings } from './settings-view/claude/claude-md-settings';
 import { AIEnhancementSection } from './settings-view/ai-enhancement';
 import { AppearanceSection } from './settings-view/appearance/appearance-section';
 import { TerminalSection } from './settings-view/terminal/terminal-section';
@@ -47,6 +48,8 @@ export function SettingsView() {
     apiKeys,
     validationModel,
     setValidationModel,
+    autoLoadClaudeMd,
+    setAutoLoadClaudeMd,
   } = useAppStore();
 
   // Hide usage tracking when using API key (only show for Claude Code CLI users)
@@ -101,6 +104,10 @@ export function SettingsView() {
               status={claudeCliStatus}
               isChecking={isCheckingClaudeCli}
               onRefresh={handleRefreshClaudeCli}
+            />
+            <ClaudeMdSettings
+              autoLoadClaudeMd={autoLoadClaudeMd}
+              onAutoLoadClaudeMdChange={setAutoLoadClaudeMd}
             />
             {showUsageTracking && <ClaudeUsageSection />}
           </div>
