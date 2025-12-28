@@ -51,6 +51,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { CLAUDE_MODELS } from '@/components/views/board-view/shared/model-constants';
+import { Textarea } from '@/components/ui/textarea';
 
 export function AgentView() {
   const { currentProject, setLastSelectedSession, getLastSelectedSession } = useAppStore();
@@ -73,7 +74,7 @@ export function AgentView() {
   const [isUserAtBottom, setIsUserAtBottom] = useState(true);
 
   // Input ref for auto-focus
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Ref for quick create session function from SessionManager
   const quickCreateSessionRef = useRef<(() => Promise<void>) | null>(null);
@@ -368,12 +369,23 @@ export function AgentView() {
     [processDroppedFiles]
   );
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
   };
+
+  const adjustTextareaHeight = useCallback(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, []);
+
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [input, adjustTextareaHeight]);
 
   const handleClearChat = async () => {
     if (!confirm('Are you sure you want to clear this conversation?')) return;
@@ -878,7 +890,7 @@ export function AgentView() {
               onDrop={handleDrop}
             >
               <div className="flex-1 relative">
-                <Input
+                <Textarea
                   ref={inputRef}
                   placeholder={
                     isDragOver
@@ -889,12 +901,13 @@ export function AgentView() {
                   }
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  onKeyPress={handleKeyPress}
+                  onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
                   disabled={!isConnected}
                   data-testid="agent-input"
+                  rows={1}
                   className={cn(
-                    'h-11 bg-background border-border rounded-xl pl-4 pr-20 text-sm transition-all',
+                    'min-h-11 bg-background border-border rounded-xl pl-4 pr-20 text-sm transition-all resize-none max-h-36 overflow-y-auto py-2.5',
                     'focus:ring-2 focus:ring-primary/20 focus:border-primary/50',
                     (selectedImages.length > 0 || selectedTextFiles.length > 0) &&
                       'border-primary/30',
@@ -1000,7 +1013,11 @@ export function AgentView() {
             <p className="text-[11px] text-muted-foreground mt-2 text-center">
               Press{' '}
               <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-medium">Enter</kbd> to
-              send
+              send,{' '}
+              <kbd className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-medium">
+                Shift+Enter
+              </kbd>{' '}
+              for new line
             </p>
           </div>
         )}

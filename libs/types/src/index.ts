@@ -105,3 +105,11 @@ export type {
   BacklogPlanRequest,
   BacklogPlanApplyResult,
 } from './backlog-plan.js';
+
+// Pipeline types
+export type {
+  PipelineStep,
+  PipelineConfig,
+  PipelineStatus,
+  FeatureStatusWithPipeline,
+} from './pipeline.js';
