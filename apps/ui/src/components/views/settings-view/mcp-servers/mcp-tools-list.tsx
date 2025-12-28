@@ -42,7 +42,7 @@ export function MCPToolsList({ tools, isLoading, error, className }: MCPToolsLis
   }
 
   if (error) {
-    return <div className={cn('text-sm text-destructive break-words', className)}>{error}</div>;
+    return <div className={cn('text-sm text-destructive wrap-break-word', className)}>{error}</div>;
   }
 
   if (!tools || tools.length === 0) {
@@ -89,7 +89,7 @@ export function MCPToolsList({ tools, isLoading, error, className }: MCPToolsLis
                     <div className="flex flex-col items-start text-left min-w-0 overflow-hidden flex-1">
                       <span className="font-medium text-xs truncate max-w-full">{tool.name}</span>
                       {tool.description && (
-                        <span className="text-xs text-muted-foreground line-clamp-2 break-words w-full">
+                        <span className="text-xs text-muted-foreground line-clamp-2 wrap-break-word w-full">
                           {tool.description}
                         </span>
                       )}
