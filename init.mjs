@@ -171,6 +171,14 @@ function killProcess(pid) {
 }
 
 /**
+ * Check if a port is in use (without killing)
+ */
+function isPortInUse(port) {
+  const pids = getProcessesOnPort(port);
+  return pids.length > 0;
+}
+
+/**
  * Kill processes on a port and wait for it to be freed
  */
 async function killPort(port) {
@@ -211,9 +219,9 @@ function sleep(ms) {
 /**
  * Check if the server health endpoint is responding
  */
-function checkHealth() {
+function checkHealth(port = 3008) {
   return new Promise((resolve) => {
-    const req = http.get('http://localhost:3008/api/health', (res) => {
+    const req = http.get(`http://localhost:${port}/api/health`, (res) => {
       resolve(res.statusCode === 200);
     });
     req.on('error', () => resolve(false));
@@ -245,10 +253,16 @@ function prompt(question) {
  * Run npm command using cross-spawn for Windows compatibility
  */
 function runNpm(args, options = {}) {
+  const { env, ...restOptions } = options;
   const spawnOptions = {
     stdio: 'inherit',
     cwd: __dirname,
-    ...options,
+    ...restOptions,
+    // Ensure environment variables are properly merged with process.env
+    env: {
+      ...process.env,
+      ...(env || {}),
+    },
   };
   // cross-spawn handles Windows .cmd files automatically
   return crossSpawn('npm', args, spawnOptions);
@@ -352,10 +366,134 @@ async function main() {
     log('Playwright installation skipped', 'yellow');
   }
 
-  // Kill any existing processes on required ports
+  // Check for processes on required ports and prompt user
   log('Checking for processes on ports 3007 and 3008...', 'yellow');
-  await killPort(3007);
-  await killPort(3008);
+
+  const webPortInUse = isPortInUse(3007);
+  const serverPortInUse = isPortInUse(3008);
+
+  let webPort = 3007;
+  let serverPort = 3008;
+  let corsOriginEnv = process.env.CORS_ORIGIN || '';
+
+  if (webPortInUse || serverPortInUse) {
+    console.log('');
+    if (webPortInUse) {
+      const pids = getProcessesOnPort(3007);
+      log(`⚠ Port 3007 is in use by process(es): ${pids.join(', ')}`, 'yellow');
+    }
+    if (serverPortInUse) {
+      const pids = getProcessesOnPort(3008);
+      log(`⚠ Port 3008 is in use by process(es): ${pids.join(', ')}`, 'yellow');
+    }
+    console.log('');
+
+    while (true) {
+      const choice = await prompt(
+        'What would you like to do? (k)ill processes, (u)se different ports, or (c)ancel: '
+      );
+      const lowerChoice = choice.toLowerCase();
+
+      if (lowerChoice === 'k' || lowerChoice === 'kill') {
+        if (webPortInUse) {
+          await killPort(3007);
+        } else {
+          log(`✓ Port 3007 is available`, 'green');
+        }
+        if (serverPortInUse) {
+          await killPort(3008);
+        } else {
+          log(`✓ Port 3008 is available`, 'green');
+        }
+        break;
+      } else if (lowerChoice === 'u' || lowerChoice === 'use') {
+        // Prompt for new ports
+        while (true) {
+          const newWebPort = await prompt('Enter web port (default 3007): ');
+          const parsedWebPort = newWebPort.trim() ? parseInt(newWebPort.trim(), 10) : 3007;
+
+          if (isNaN(parsedWebPort) || parsedWebPort < 1024 || parsedWebPort > 65535) {
+            log('Invalid port. Please enter a number between 1024 and 65535.', 'red');
+            continue;
+          }
+
+          if (isPortInUse(parsedWebPort)) {
+            const pids = getProcessesOnPort(parsedWebPort);
+            log(
+              `Port ${parsedWebPort} is already in use by process(es): ${pids.join(', ')}`,
+              'red'
+            );
+            const useAnyway = await prompt('Use this port anyway? (y/n): ');
+            if (useAnyway.toLowerCase() !== 'y' && useAnyway.toLowerCase() !== 'yes') {
+              continue;
+            }
+          }
+
+          webPort = parsedWebPort;
+          break;
+        }
+
+        while (true) {
+          const newServerPort = await prompt('Enter server port (default 3008): ');
+          const parsedServerPort = newServerPort.trim() ? parseInt(newServerPort.trim(), 10) : 3008;
+
+          if (isNaN(parsedServerPort) || parsedServerPort < 1024 || parsedServerPort > 65535) {
+            log('Invalid port. Please enter a number between 1024 and 65535.', 'red');
+            continue;
+          }
+
+          if (parsedServerPort === webPort) {
+            log('Server port cannot be the same as web port.', 'red');
+            continue;
+          }
+
+          if (isPortInUse(parsedServerPort)) {
+            const pids = getProcessesOnPort(parsedServerPort);
+            log(
+              `Port ${parsedServerPort} is already in use by process(es): ${pids.join(', ')}`,
+              'red'
+            );
+            const useAnyway = await prompt('Use this port anyway? (y/n): ');
+            if (useAnyway.toLowerCase() !== 'y' && useAnyway.toLowerCase() !== 'yes') {
+              continue;
+            }
+          }
+
+          serverPort = parsedServerPort;
+          break;
+        }
+
+        log(`Using ports: Web=${webPort}, Server=${serverPort}`, 'blue');
+        break;
+      } else if (lowerChoice === 'c' || lowerChoice === 'cancel') {
+        log('Cancelled.', 'yellow');
+        process.exit(0);
+      } else {
+        log(
+          'Invalid choice. Please enter k (kill), u (use different ports), or c (cancel).',
+          'red'
+        );
+      }
+    }
+  } else {
+    log(`✓ Port 3007 is available`, 'green');
+    log(`✓ Port 3008 is available`, 'green');
+  }
+
+  // Ensure backend CORS allows whichever UI port we ended up using.
+  // If CORS_ORIGIN is set, server enforces it strictly (see apps/server/src/index.ts),
+  // so we must include the selected web origin(s) in that list.
+  {
+    const existing = (process.env.CORS_ORIGIN || '')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean)
+      .filter((o) => o !== '*');
+    const origins = new Set(existing);
+    origins.add(`http://localhost:${webPort}`);
+    origins.add(`http://127.0.0.1:${webPort}`);
+    corsOriginEnv = Array.from(origins).join(',');
+  }
   console.log('');
 
   // Show menu
@@ -388,7 +526,7 @@ async function main() {
       log('Launching Web Application...', 'blue');
 
       // Start the backend server
-      log('Starting backend server on port 3008...', 'blue');
+      log(`Starting backend server on port ${serverPort}...`, 'blue');
 
       // Create logs directory
       if (!fs.existsSync(path.join(__dirname, 'logs'))) {
@@ -399,6 +537,10 @@ async function main() {
       const logStream = fs.createWriteStream(path.join(__dirname, 'logs', 'server.log'));
       serverProcess = runNpm(['run', 'dev:server'], {
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          PORT: String(serverPort),
+          CORS_ORIGIN: corsOriginEnv,
+        },
       });
 
       // Pipe to both log file and console so user can see API key
@@ -418,7 +560,7 @@ async function main() {
       let serverReady = false;
 
       for (let i = 0; i < maxRetries; i++) {
-        if (await checkHealth()) {
+        if (await checkHealth(serverPort)) {
           serverReady = true;
           break;
         }
@@ -436,11 +578,17 @@ async function main() {
       }
 
       log('✓ Server is ready!', 'green');
-      log(`The application will be available at: http://localhost:3007`, 'green');
+      log(`The application will be available at: http://localhost:${webPort}`, 'green');
       console.log('');
 
       // Start web app
-      webProcess = runNpm(['run', 'dev:web'], { stdio: 'inherit' });
+      webProcess = runNpm(['run', 'dev:web'], {
+        stdio: 'inherit',
+        env: {
+          TEST_PORT: String(webPort),
+          VITE_SERVER_URL: `http://localhost:${serverPort}`,
+        },
+      });
       await new Promise((resolve) => {
         webProcess.on('close', resolve);
       });
@@ -452,7 +600,18 @@ async function main() {
       log('(Electron will start its own backend server)', 'yellow');
       console.log('');
 
-      electronProcess = runNpm(['run', 'dev:electron'], { stdio: 'inherit' });
+      // Pass selected ports through to Vite + Electron backend
+      // - TEST_PORT controls Vite dev server port (see apps/ui/vite.config.mts)
+      // - PORT controls backend server port (see apps/server/src/index.ts)
+      electronProcess = runNpm(['run', 'dev:electron'], {
+        stdio: 'inherit',
+        env: {
+          TEST_PORT: String(webPort),
+          PORT: String(serverPort),
+          VITE_SERVER_URL: `http://localhost:${serverPort}`,
+          CORS_ORIGIN: corsOriginEnv,
+        },
+      });
       await new Promise((resolve) => {
         electronProcess.on('close', resolve);
       });

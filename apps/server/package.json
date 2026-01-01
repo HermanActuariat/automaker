@@ -1,6 +1,6 @@
 {
   "name": "@automaker/server",
-  "version": "0.1.0",
+  "version": "0.7.1",
   "description": "Backend server for Automaker - provides API for both web and Electron modes",
   "author": "AutoMaker Team",
   "license": "SEE LICENSE IN LICENSE",
@@ -24,7 +24,7 @@
     "test:unit": "vitest run tests/unit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.1.72",
+    "@anthropic-ai/claude-agent-sdk": "0.1.76",
     "@automaker/dependency-resolver": "1.0.0",
     "@automaker/git-utils": "1.0.0",
     "@automaker/model-resolver": "1.0.0",

@@ -133,7 +133,11 @@ app.use(
       }
 
       // For local development, allow localhost origins
-      if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+      if (
+        origin.startsWith('http://localhost:') ||
+        origin.startsWith('http://127.0.0.1:') ||
+        origin.startsWith('http://[::1]:')
+      ) {
         callback(null, origin);
         return;
       }

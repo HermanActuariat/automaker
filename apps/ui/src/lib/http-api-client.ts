@@ -32,14 +32,42 @@ import type { Feature, ClaudeUsageResponse } from '@/store/app-store';
 import type { WorktreeAPI, GitAPI, ModelDefinition, ProviderStatus } from '@/types/electron';
 import { getGlobalFileBrowser } from '@/contexts/file-browser-context';
 
-// Server URL - configurable via environment variable
+// Cached server URL (set during initialization in Electron mode)
+let cachedServerUrl: string | null = null;
+
+/**
+ * Initialize server URL from Electron IPC.
+ * Must be called early in Electron mode before making API requests.
+ */
+export const initServerUrl = async (): Promise<void> => {
+  if (typeof window !== 'undefined' && window.electronAPI?.getServerUrl) {
+    try {
+      cachedServerUrl = await window.electronAPI.getServerUrl();
+      console.log('[HTTP Client] Server URL from Electron:', cachedServerUrl);
+    } catch (error) {
+      console.warn('[HTTP Client] Failed to get server URL from Electron:', error);
+    }
+  }
+};
+
+// Server URL - uses cached value from IPC or environment variable
 const getServerUrl = (): string => {
+  // Use cached URL from Electron IPC if available
+  if (cachedServerUrl) {
+    return cachedServerUrl;
+  }
+
   if (typeof window !== 'undefined') {
     const envUrl = import.meta.env.VITE_SERVER_URL;
     if (envUrl) return envUrl;
   }
   return 'http://localhost:3008';
 };
+
+/**
+ * Get the server URL (exported for use in other modules)
+ */
+export const getServerUrlSync = (): string => getServerUrl();
 
 // Cached API key for authentication (Electron mode only)
 let cachedApiKey: string | null = null;
@@ -85,7 +113,7 @@ export const isElectronMode = (): boolean => {
 };
 
 /**
- * Initialize API key for Electron mode authentication.
+ * Initialize API key and server URL for Electron mode authentication.
  * In web mode, authentication uses HTTP-only cookies instead.
  *
  * This should be called early in app initialization.
@@ -100,6 +128,9 @@ export const initApiKey = async (): Promise<void> => {
   // Create and store the promise so concurrent calls wait for the same initialization
   apiKeyInitPromise = (async () => {
     try {
+      // Initialize server URL from Electron IPC first (needed for API requests)
+      await initServerUrl();
+
       // Only Electron mode uses API key header auth
       if (typeof window !== 'undefined' && window.electronAPI?.getApiKey) {
         try {
@@ -450,8 +481,17 @@ export class HttpApiClient implements ElectronAPI {
       this.ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          console.log(
+            '[HttpApiClient] WebSocket message:',
+            data.type,
+            'hasPayload:',
+            !!data.payload,
+            'callbacksRegistered:',
+            this.eventCallbacks.has(data.type)
+          );
           const callbacks = this.eventCallbacks.get(data.type);
           if (callbacks) {
+            console.log('[HttpApiClient] Dispatching to', callbacks.size, 'callbacks');
             callbacks.forEach((cb) => cb(data.payload));
           }
         } catch (error) {

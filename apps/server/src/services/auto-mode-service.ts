@@ -190,6 +190,10 @@ interface AutoModeConfig {
   projectPath: string;
 }
 
+// Constants for consecutive failure tracking
+const CONSECUTIVE_FAILURE_THRESHOLD = 3; // Pause after 3 consecutive failures
+const FAILURE_WINDOW_MS = 60000; // Failures within 1 minute count as consecutive
+
 export class AutoModeService {
   private events: EventEmitter;
   private runningFeatures = new Map<string, RunningFeature>();
@@ -200,10 +204,87 @@ export class AutoModeService {
   private config: AutoModeConfig | null = null;
   private pendingApprovals = new Map<string, PendingApproval>();
   private settingsService: SettingsService | null = null;
+  // Track consecutive failures to detect quota/API issues
+  private consecutiveFailures: { timestamp: number; error: string }[] = [];
+  private pausedDueToFailures = false;
 
   constructor(events: EventEmitter, settingsService?: SettingsService) {
     this.events = events;
     this.settingsService = settingsService ?? null;
+  }
+
+  /**
+   * Track a failure and check if we should pause due to consecutive failures.
+   * This handles cases where the SDK doesn't return useful error messages.
+   */
+  private trackFailureAndCheckPause(errorInfo: { type: string; message: string }): boolean {
+    const now = Date.now();
+
+    // Add this failure
+    this.consecutiveFailures.push({ timestamp: now, error: errorInfo.message });
+
+    // Remove old failures outside the window
+    this.consecutiveFailures = this.consecutiveFailures.filter(
+      (f) => now - f.timestamp < FAILURE_WINDOW_MS
+    );
+
+    // Check if we've hit the threshold
+    if (this.consecutiveFailures.length >= CONSECUTIVE_FAILURE_THRESHOLD) {
+      return true; // Should pause
+    }
+
+    // Also immediately pause for known quota/rate limit errors
+    if (errorInfo.type === 'quota_exhausted' || errorInfo.type === 'rate_limit') {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Signal that we should pause due to repeated failures or quota exhaustion.
+   * This will pause the auto loop to prevent repeated failures.
+   */
+  private signalShouldPause(errorInfo: { type: string; message: string }): void {
+    if (this.pausedDueToFailures) {
+      return; // Already paused
+    }
+
+    this.pausedDueToFailures = true;
+    const failureCount = this.consecutiveFailures.length;
+    console.log(
+      `[AutoMode] Pausing auto loop after ${failureCount} consecutive failures. Last error: ${errorInfo.type}`
+    );
+
+    // Emit event to notify UI
+    this.emitAutoModeEvent('auto_mode_paused_failures', {
+      message:
+        failureCount >= CONSECUTIVE_FAILURE_THRESHOLD
+          ? `Auto Mode paused: ${failureCount} consecutive failures detected. This may indicate a quota limit or API issue. Please check your usage and try again.`
+          : 'Auto Mode paused: Usage limit or API error detected. Please wait for your quota to reset or check your API configuration.',
+      errorType: errorInfo.type,
+      originalError: errorInfo.message,
+      failureCount,
+      projectPath: this.config?.projectPath,
+    });
+
+    // Stop the auto loop
+    this.stopAutoLoop();
+  }
+
+  /**
+   * Reset failure tracking (called when user manually restarts auto mode)
+   */
+  private resetFailureTracking(): void {
+    this.consecutiveFailures = [];
+    this.pausedDueToFailures = false;
+  }
+
+  /**
+   * Record a successful feature completion to reset consecutive failure count
+   */
+  private recordSuccess(): void {
+    this.consecutiveFailures = [];
   }
 
   /**
@@ -213,6 +294,9 @@ export class AutoModeService {
     if (this.autoLoopRunning) {
       throw new Error('Auto mode is already running');
     }
+
+    // Reset failure tracking when user manually starts auto mode
+    this.resetFailureTracking();
 
     this.autoLoopRunning = true;
     this.autoLoopAbortController = new AbortController();
@@ -502,6 +586,9 @@ export class AutoModeService {
       const finalStatus = feature.skipTests ? 'waiting_approval' : 'verified';
       await this.updateFeatureStatus(projectPath, featureId, finalStatus);
 
+      // Record success to reset consecutive failure tracking
+      this.recordSuccess();
+
       this.emitAutoModeEvent('auto_mode_feature_complete', {
         featureId,
         passes: true,
@@ -529,6 +616,21 @@ export class AutoModeService {
           errorType: errorInfo.type,
           projectPath,
         });
+
+        // Track this failure and check if we should pause auto mode
+        // This handles both specific quota/rate limit errors AND generic failures
+        // that may indicate quota exhaustion (SDK doesn't always return useful errors)
+        const shouldPause = this.trackFailureAndCheckPause({
+          type: errorInfo.type,
+          message: errorInfo.message,
+        });
+
+        if (shouldPause) {
+          this.signalShouldPause({
+            type: errorInfo.type,
+            message: errorInfo.message,
+          });
+        }
       }
     } finally {
       console.log(`[AutoMode] Feature ${featureId} execution ended, cleaning up runningFeatures`);
@@ -689,6 +791,11 @@ Complete the pipeline step instructions above. Review the previous work and appl
     this.cancelPlanApproval(featureId);
 
     running.abortController.abort();
+
+    // Remove from running features immediately to allow resume
+    // The abort signal will still propagate to stop any ongoing execution
+    this.runningFeatures.delete(featureId);
+
     return true;
   }
 
@@ -926,6 +1033,9 @@ Address the follow-up instructions above. Review the previous work and make the 
       const finalStatus = feature?.skipTests ? 'waiting_approval' : 'verified';
       await this.updateFeatureStatus(projectPath, featureId, finalStatus);
 
+      // Record success to reset consecutive failure tracking
+      this.recordSuccess();
+
       this.emitAutoModeEvent('auto_mode_feature_complete', {
         featureId,
         passes: true,
@@ -941,6 +1051,19 @@ Address the follow-up instructions above. Review the previous work and make the 
           errorType: errorInfo.type,
           projectPath,
         });
+
+        // Track this failure and check if we should pause auto mode
+        const shouldPause = this.trackFailureAndCheckPause({
+          type: errorInfo.type,
+          message: errorInfo.message,
+        });
+
+        if (shouldPause) {
+          this.signalShouldPause({
+            type: errorInfo.type,
+            message: errorInfo.message,
+          });
+        }
       }
     } finally {
       this.runningFeatures.delete(featureId);
@@ -1940,7 +2063,9 @@ This mock response was generated because AUTOMAKER_MOCK_AGENT=true was set.
     };
 
     // Execute via provider
+    console.log(`[AutoMode] Starting stream for feature ${featureId}...`);
     const stream = provider.executeQuery(executeOptions);
+    console.log(`[AutoMode] Stream created, starting to iterate...`);
     // Initialize with previous content if this is a follow-up, with a separator
     let responseText = previousContent
       ? `${previousContent}\n\n---\n\n## Follow-up Session\n\n`
@@ -1978,6 +2103,7 @@ This mock response was generated because AUTOMAKER_MOCK_AGENT=true was set.
     };
 
     streamLoop: for await (const msg of stream) {
+      console.log(`[AutoMode] Stream message received:`, msg.type, msg.subtype || '');
       if (msg.type === 'assistant' && msg.message?.content) {
         for (const block of msg.message.content) {
           if (block.type === 'text') {
@@ -2433,6 +2559,9 @@ Implement all the changes described in the plan above.`;
 
             // Only emit progress for non-marker text (marker was already handled above)
             if (!specDetected) {
+              console.log(
+                `[AutoMode] Emitting progress event for ${featureId}, content length: ${block.text?.length || 0}`
+              );
               this.emitAutoModeEvent('auto_mode_progress', {
                 featureId,
                 content: block.text,

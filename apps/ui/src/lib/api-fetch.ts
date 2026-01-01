@@ -9,16 +9,10 @@
  * Use this instead of raw fetch() for all authenticated API calls.
  */
 
-import { getApiKey, getSessionToken } from './http-api-client';
+import { getApiKey, getSessionToken, getServerUrlSync } from './http-api-client';
 
-// Server URL - configurable via environment variable
-const getServerUrl = (): string => {
-  if (typeof window !== 'undefined') {
-    const envUrl = import.meta.env.VITE_SERVER_URL;
-    if (envUrl) return envUrl;
-  }
-  return 'http://localhost:3008';
-};
+// Server URL - uses shared cached URL from http-api-client
+const getServerUrl = (): string => getServerUrlSync();
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
 

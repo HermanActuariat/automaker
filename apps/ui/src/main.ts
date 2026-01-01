@@ -11,6 +11,7 @@ import path from 'path';
 import { spawn, execSync, ChildProcess } from 'child_process';
 import crypto from 'crypto';
 import http, { Server } from 'http';
+import net from 'net';
 import { app, BrowserWindow, ipcMain, dialog, shell, screen } from 'electron';
 import {
   findNodeExecutable,
@@ -51,8 +52,51 @@ if (isDev) {
 let mainWindow: BrowserWindow | null = null;
 let serverProcess: ChildProcess | null = null;
 let staticServer: Server | null = null;
-const SERVER_PORT = 3008;
-const STATIC_PORT = 3007;
+
+// Default ports (can be overridden via env) - will be dynamically assigned if these are in use
+// When launched via root init.mjs we pass:
+// - PORT (backend)
+// - TEST_PORT (vite dev server / static)
+const DEFAULT_SERVER_PORT = parseInt(process.env.PORT || '3008', 10);
+const DEFAULT_STATIC_PORT = parseInt(process.env.TEST_PORT || '3007', 10);
+
+// Actual ports in use (set during startup)
+let serverPort = DEFAULT_SERVER_PORT;
+let staticPort = DEFAULT_STATIC_PORT;
+
+/**
+ * Check if a port is available
+ */
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => {
+      resolve(false);
+    });
+    server.once('listening', () => {
+      server.close(() => {
+        resolve(true);
+      });
+    });
+    // Use Node's default binding semantics (matches most dev servers)
+    // This avoids false-positives when a port is taken on IPv6/dual-stack.
+    server.listen(port);
+  });
+}
+
+/**
+ * Find an available port starting from the preferred port
+ * Tries up to 100 ports in sequence
+ */
+async function findAvailablePort(preferredPort: number): Promise<number> {
+  for (let offset = 0; offset < 100; offset++) {
+    const port = preferredPort + offset;
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+  }
+  throw new Error(`Could not find an available port starting from ${preferredPort}`);
+}
 
 // ============================================
 // Window sizing constants for kanban layout
@@ -326,8 +370,8 @@ async function startStaticServer(): Promise<void> {
   });
 
   return new Promise((resolve, reject) => {
-    staticServer!.listen(STATIC_PORT, () => {
-      console.log(`[Electron] Static server running at http://localhost:${STATIC_PORT}`);
+    staticServer!.listen(staticPort, () => {
+      console.log(`[Electron] Static server running at http://localhost:${staticPort}`);
       resolve();
     });
     staticServer!.on('error', reject);
@@ -432,7 +476,7 @@ async function startServer(): Promise<void> {
   const env = {
     ...process.env,
     PATH: enhancedPath,
-    PORT: SERVER_PORT.toString(),
+    PORT: serverPort.toString(),
     DATA_DIR: app.getPath('userData'),
     NODE_PATH: serverNodeModules,
     // Pass API key to server for CSRF protection
@@ -443,6 +487,8 @@ async function startServer(): Promise<void> {
       ALLOWED_ROOT_DIRECTORY: process.env.ALLOWED_ROOT_DIRECTORY,
     }),
   };
+
+  console.log(`[Electron] Server will use port ${serverPort}`);
 
   console.log('[Electron] Starting backend server...');
   console.log('[Electron] Server path:', serverPath);
@@ -483,7 +529,7 @@ async function waitForServer(maxAttempts = 30): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       await new Promise<void>((resolve, reject) => {
-        const req = http.get(`http://localhost:${SERVER_PORT}/api/health`, (res) => {
+        const req = http.get(`http://localhost:${serverPort}/api/health`, (res) => {
           if (res.statusCode === 200) {
             resolve();
           } else {
@@ -548,9 +594,9 @@ function createWindow(): void {
     mainWindow.loadURL(VITE_DEV_SERVER_URL);
   } else if (isDev) {
     // Fallback for dev without Vite server URL
-    mainWindow.loadURL(`http://localhost:${STATIC_PORT}`);
+    mainWindow.loadURL(`http://localhost:${staticPort}`);
   } else {
-    mainWindow.loadURL(`http://localhost:${STATIC_PORT}`);
+    mainWindow.loadURL(`http://localhost:${staticPort}`);
   }
 
   if (isDev && process.env.OPEN_DEVTOOLS === 'true') {
@@ -642,6 +688,21 @@ app.whenReady().then(async () => {
   ensureApiKey();
 
   try {
+    // Find available ports (prevents conflicts with other apps using same ports)
+    serverPort = await findAvailablePort(DEFAULT_SERVER_PORT);
+    if (serverPort !== DEFAULT_SERVER_PORT) {
+      console.log(
+        `[Electron] Default server port ${DEFAULT_SERVER_PORT} in use, using port ${serverPort}`
+      );
+    }
+
+    staticPort = await findAvailablePort(DEFAULT_STATIC_PORT);
+    if (staticPort !== DEFAULT_STATIC_PORT) {
+      console.log(
+        `[Electron] Default static port ${DEFAULT_STATIC_PORT} in use, using port ${staticPort}`
+      );
+    }
+
     // Start static file server in production
     if (app.isPackaged) {
       await startStaticServer();
@@ -675,7 +736,29 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  // On macOS, keep the app and servers running when all windows are closed
+  // (standard macOS behavior). On other platforms, stop servers and quit.
   if (process.platform !== 'darwin') {
+    if (serverProcess && serverProcess.pid) {
+      console.log('[Electron] All windows closed, stopping server...');
+      if (process.platform === 'win32') {
+        try {
+          execSync(`taskkill /f /t /pid ${serverProcess.pid}`, { stdio: 'ignore' });
+        } catch (error) {
+          console.error('[Electron] Failed to kill server process:', (error as Error).message);
+        }
+      } else {
+        serverProcess.kill('SIGTERM');
+      }
+      serverProcess = null;
+    }
+
+    if (staticServer) {
+      console.log('[Electron] Stopping static server...');
+      staticServer.close();
+      staticServer = null;
+    }
+
     app.quit();
   }
 });
@@ -822,7 +905,7 @@ ipcMain.handle('ping', async () => {
 
 // Get server URL for HTTP client
 ipcMain.handle('server:getUrl', async () => {
-  return `http://localhost:${SERVER_PORT}`;
+  return `http://localhost:${serverPort}`;
 });
 
 // Get API key for authentication

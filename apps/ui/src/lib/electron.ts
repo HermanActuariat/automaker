@@ -95,7 +95,7 @@ import type {
 } from '@/types/electron';
 
 // Import HTTP API client (ES module)
-import { getHttpApiClient } from './http-api-client';
+import { getHttpApiClient, getServerUrlSync } from './http-api-client';
 
 // Feature type - Import from app-store
 import type { Feature } from '@/store/app-store';
@@ -695,7 +695,7 @@ export const checkServerAvailable = async (): Promise<boolean> => {
 
   serverCheckPromise = (async () => {
     try {
-      const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3008';
+      const serverUrl = import.meta.env.VITE_SERVER_URL || getServerUrlSync();
       const response = await fetch(`${serverUrl}/api/health`, {
         method: 'GET',
         signal: AbortSignal.timeout(2000),

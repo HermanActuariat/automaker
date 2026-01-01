@@ -9,6 +9,7 @@ export {
   isCancellationError,
   isAuthenticationError,
   isRateLimitError,
+  isQuotaExhaustedError,
   extractRetryAfter,
   classifyError,
   getUserFriendlyErrorMessage,

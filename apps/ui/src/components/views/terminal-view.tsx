@@ -13,6 +13,7 @@ import {
   SquarePlus,
   Settings,
 } from 'lucide-react';
+import { getServerUrlSync } from '@/lib/http-api-client';
 import {
   useAppStore,
   type TerminalPanelContent,
@@ -272,7 +273,7 @@ export function TerminalView() {
   // Get the default run script from terminal settings
   const defaultRunScript = useAppStore((state) => state.terminalState.defaultRunScript);
 
-  const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3008';
+  const serverUrl = import.meta.env.VITE_SERVER_URL || getServerUrlSync();
 
   // Helper to collect all session IDs from all tabs
   const collectAllSessionIds = useCallback((): string[] => {

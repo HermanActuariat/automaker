@@ -105,9 +105,21 @@ export function AgentOutputModal({
     const api = getElectronAPI();
     if (!api?.autoMode) return;
 
+    console.log('[AgentOutputModal] Subscribing to events for featureId:', featureId);
+
     const unsubscribe = api.autoMode.onEvent((event) => {
+      console.log(
+        '[AgentOutputModal] Received event:',
+        event.type,
+        'featureId:',
+        'featureId' in event ? event.featureId : 'none',
+        'modalFeatureId:',
+        featureId
+      );
+
       // Filter events for this specific feature only (skip events without featureId)
       if ('featureId' in event && event.featureId !== featureId) {
+        console.log('[AgentOutputModal] Skipping event - featureId mismatch');
         return;
       }
 

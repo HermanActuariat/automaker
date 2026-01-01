@@ -7,6 +7,7 @@ export type ErrorType =
   | 'abort'
   | 'execution'
   | 'rate_limit'
+  | 'quota_exhausted'
   | 'unknown';
 
 /**
@@ -19,6 +20,7 @@ export interface ErrorInfo {
   isAuth: boolean;
   isCancellation: boolean;
   isRateLimit: boolean;
+  isQuotaExhausted: boolean; // Session/weekly usage limit reached
   retryAfter?: number; // Seconds to wait before retrying (for rate limit errors)
   originalError: unknown;
 }

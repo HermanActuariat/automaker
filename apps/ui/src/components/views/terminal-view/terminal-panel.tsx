@@ -40,7 +40,7 @@ import {
 } from '@/config/terminal-themes';
 import { toast } from 'sonner';
 import { getElectronAPI } from '@/lib/electron';
-import { getApiKey, getSessionToken } from '@/lib/http-api-client';
+import { getApiKey, getSessionToken, getServerUrlSync } from '@/lib/http-api-client';
 
 // Font size constraints
 const MIN_FONT_SIZE = 8;
@@ -483,7 +483,7 @@ export function TerminalPanel({
     [closeContextMenu, copySelection, pasteFromClipboard, selectAll, clearTerminal]
   );
 
-  const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3008';
+  const serverUrl = import.meta.env.VITE_SERVER_URL || getServerUrlSync();
   const wsUrl = serverUrl.replace(/^http/, 'ws');
 
   // Fetch a short-lived WebSocket token for secure authentication
