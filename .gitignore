@@ -92,3 +92,6 @@ yarn.lock
 # Fork-specific workflow files (should never be committed)
 DEVELOPMENT_WORKFLOW.md
 check-sync.sh
+# API key files
+data/.api-key
+data/credentials.json

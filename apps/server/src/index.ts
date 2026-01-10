@@ -597,6 +597,26 @@ const startServer = (port: number) => {
 
 startServer(PORT);
 
+// Global error handlers to prevent crashes from uncaught errors
+process.on('unhandledRejection', (reason: unknown, _promise: Promise<unknown>) => {
+  logger.error('Unhandled Promise Rejection:', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+  // Don't exit - log the error and continue running
+  // This prevents the server from crashing due to unhandled rejections
+});
+
+process.on('uncaughtException', (error: Error) => {
+  logger.error('Uncaught Exception:', {
+    message: error.message,
+    stack: error.stack,
+  });
+  // Exit on uncaught exceptions to prevent undefined behavior
+  // The process is in an unknown state after an uncaught exception
+  process.exit(1);
+});
+
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down...');
