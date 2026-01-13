@@ -40,6 +40,13 @@ fi
 chown -R automaker:automaker /home/automaker/.config/opencode
 chmod -R 700 /home/automaker/.config/opencode
 
+# OpenCode also uses ~/.cache/opencode for cache data (version file, etc.)
+if [ ! -d "/home/automaker/.cache/opencode" ]; then
+    mkdir -p /home/automaker/.cache/opencode
+fi
+chown -R automaker:automaker /home/automaker/.cache/opencode
+chmod -R 700 /home/automaker/.cache/opencode
+
 # If CURSOR_AUTH_TOKEN is set, write it to the cursor auth file
 # On Linux, cursor-agent uses ~/.config/cursor/auth.json for file-based credential storage
 # The env var CURSOR_AUTH_TOKEN is also checked directly by cursor-agent

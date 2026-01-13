@@ -90,6 +90,9 @@ services:
       # Persist OpenCode user configuration across container restarts
       - automaker-opencode-config:/home/automaker/.config/opencode
 
+      # Persist OpenCode cache directory (contains version file and other cache data)
+      - automaker-opencode-cache:/home/automaker/.cache/opencode
+
       # NO host directory mounts - container cannot access your laptop files
       # If you need to work on a project, create it INSIDE the container
       # or use a separate docker-compose override file
@@ -123,3 +126,8 @@ volumes:
     name: automaker-opencode-config
     # Named volume for OpenCode user configuration (~/.config/opencode)
     # Persists user configuration across container restarts
+
+  automaker-opencode-cache:
+    name: automaker-opencode-cache
+    # Named volume for OpenCode cache directory (~/.cache/opencode)
+    # Contains version file and other cached data
