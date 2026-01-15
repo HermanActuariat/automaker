@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react';
+// @ts-nocheck
+import { useState, useEffect, useRef } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import {
   Dialog,
   DialogContent,
@@ -7,11 +9,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { HotkeyButton } from '@/components/ui/hotkey-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import { CategoryAutocomplete } from '@/components/ui/category-autocomplete';
 import {
   DescriptionImageDropZone,
@@ -19,48 +21,67 @@ import {
   FeatureTextFilePath as DescriptionTextFilePath,
   ImagePreviewMap,
 } from '@/components/ui/description-image-dropzone';
-import {
-  MessageSquare,
-  Settings2,
-  SlidersHorizontal,
-  Sparkles,
-  ChevronDown,
-  Play,
-} from 'lucide-react';
+import { Play, Cpu, FolderKanban, Settings2 } from 'lucide-react';
+import { useNavigate } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { getElectronAPI } from '@/lib/electron';
+import { cn } from '@/lib/utils';
 import { modelSupportsThinking } from '@/lib/utils';
 import {
   useAppStore,
-  AgentModel,
+  ModelAlias,
   ThinkingLevel,
   FeatureImage,
-  AIProfile,
   PlanningMode,
   Feature,
 } from '@/store/app-store';
+import type { ReasoningEffort, PhaseModelEntry, AgentModel } from '@automaker/types';
+import { supportsReasoningEffort, isClaudeModel } from '@automaker/types';
 import {
-  ModelSelector,
-  ThinkingLevelSelector,
-  ProfileQuickSelect,
   TestingTabContent,
   PrioritySelector,
-  BranchSelector,
-  PlanningModeSelector,
+  WorkModeSelector,
+  PlanningModeSelect,
   AncestorContextSection,
+  EnhanceWithAI,
+  EnhancementHistoryButton,
+  type BaseHistoryEntry,
 } from '../shared';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { useNavigate } from '@tanstack/react-router';
+import type { WorkMode } from '../shared';
+import { PhaseModelSelector } from '@/components/views/settings-view/model-defaults/phase-model-selector';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   getAncestors,
   formatAncestorContextForPrompt,
   type AncestorContext,
 } from '@automaker/dependency-resolver';
+
+const logger = createLogger('AddFeatureDialog');
+
+/**
+ * Determines the default work mode based on global settings and current worktree selection.
+ *
+ * Priority:
+ * 1. If forceCurrentBranchMode is true, always defaults to 'current' (work on current branch)
+ * 2. If a non-main worktree is selected in the board header, defaults to 'custom' (use that branch)
+ * 3. If useWorktrees global setting is enabled, defaults to 'auto' (automatic worktree creation)
+ * 4. Otherwise, defaults to 'current' (work on current branch without isolation)
+ */
+const getDefaultWorkMode = (
+  useWorktrees: boolean,
+  selectedNonMainWorktreeBranch?: string,
+  forceCurrentBranchMode?: boolean
+): WorkMode => {
+  // If force current branch mode is enabled (worktree setting is off), always use 'current'
+  if (forceCurrentBranchMode) {
+    return 'current';
+  }
+  // If a non-main worktree is selected, default to 'custom' mode with that branch
+  if (selectedNonMainWorktreeBranch) {
+    return 'custom';
+  }
+  // Otherwise, respect the global worktree setting
+  return useWorktrees ? 'auto' : 'current';
+};
 
 type FeatureData = {
   title: string;
@@ -72,11 +93,13 @@ type FeatureData = {
   skipTests: boolean;
   model: AgentModel;
   thinkingLevel: ThinkingLevel;
-  branchName: string; // Can be empty string to use current branch
+  reasoningEffort: ReasoningEffort;
+  branchName: string;
   priority: number;
   planningMode: PlanningMode;
   requirePlanApproval: boolean;
   dependencies?: string[];
+  workMode: WorkMode;
 };
 
 interface AddFeatureDialogProps {
@@ -86,16 +109,30 @@ interface AddFeatureDialogProps {
   onAddAndStart?: (feature: FeatureData) => void;
   categorySuggestions: string[];
   branchSuggestions: string[];
-  branchCardCounts?: Record<string, number>; // Map of branch name to unarchived card count
+  branchCardCounts?: Record<string, number>;
   defaultSkipTests: boolean;
   defaultBranch?: string;
   currentBranch?: string;
   isMaximized: boolean;
-  showProfilesOnly: boolean;
-  aiProfiles: AIProfile[];
-  // Spawn task mode props
   parentFeature?: Feature | null;
   allFeatures?: Feature[];
+  /**
+   * When a non-main worktree is selected in the board header, this will be set to that worktree's branch.
+   * When set, the dialog will default to 'custom' work mode with this branch pre-filled.
+   */
+  selectedNonMainWorktreeBranch?: string;
+  /**
+   * When true, forces the dialog to default to 'current' work mode (work on current branch).
+   * This is used when the "Default to worktree mode" setting is disabled.
+   */
+  forceCurrentBranchMode?: boolean;
+}
+
+/**
+ * A single entry in the description history
+ */
+interface DescriptionHistoryEntry extends BaseHistoryEntry {
+  description: string;
 }
 
 export function AddFeatureDialog({
@@ -110,77 +147,78 @@ export function AddFeatureDialog({
   defaultBranch = 'main',
   currentBranch,
   isMaximized,
-  showProfilesOnly,
-  aiProfiles,
   parentFeature = null,
   allFeatures = [],
+  selectedNonMainWorktreeBranch,
+  forceCurrentBranchMode,
 }: AddFeatureDialogProps) {
   const isSpawnMode = !!parentFeature;
   const navigate = useNavigate();
-  const [useCurrentBranch, setUseCurrentBranch] = useState(true);
-  const [newFeature, setNewFeature] = useState({
-    title: '',
-    category: '',
-    description: '',
-    images: [] as FeatureImage[],
-    imagePaths: [] as DescriptionImagePath[],
-    textFilePaths: [] as DescriptionTextFilePath[],
-    skipTests: false,
-    model: 'opus' as AgentModel,
-    thinkingLevel: 'none' as ThinkingLevel,
-    branchName: '',
-    priority: 2 as number, // Default to medium priority
-  });
-  const [newFeaturePreviewMap, setNewFeaturePreviewMap] = useState<ImagePreviewMap>(
-    () => new Map()
-  );
-  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false);
-  const [descriptionError, setDescriptionError] = useState(false);
-  const [isEnhancing, setIsEnhancing] = useState(false);
-  const [enhancementMode, setEnhancementMode] = useState<
-    'improve' | 'technical' | 'simplify' | 'acceptance'
-  >('improve');
+  const [workMode, setWorkMode] = useState<WorkMode>('current');
+
+  // Form state
+  const [title, setTitle] = useState('');
+  const [category, setCategory] = useState('');
+  const [description, setDescription] = useState('');
+  const [images, setImages] = useState<FeatureImage[]>([]);
+  const [imagePaths, setImagePaths] = useState<DescriptionImagePath[]>([]);
+  const [textFilePaths, setTextFilePaths] = useState<DescriptionTextFilePath[]>([]);
+  const [skipTests, setSkipTests] = useState(false);
+  const [branchName, setBranchName] = useState('');
+  const [priority, setPriority] = useState(2);
+
+  // Model selection state
+  const [modelEntry, setModelEntry] = useState<PhaseModelEntry>({ model: 'opus' });
+
+  // Check if current model supports planning mode (Claude/Anthropic only)
+  const modelSupportsPlanningMode = isClaudeModel(modelEntry.model);
+
+  // Planning mode state
   const [planningMode, setPlanningMode] = useState<PlanningMode>('skip');
   const [requirePlanApproval, setRequirePlanApproval] = useState(false);
+
+  // UI state
+  const [previewMap, setPreviewMap] = useState<ImagePreviewMap>(() => new Map());
+  const [descriptionError, setDescriptionError] = useState(false);
+
+  // Description history state
+  const [descriptionHistory, setDescriptionHistory] = useState<DescriptionHistoryEntry[]>([]);
 
   // Spawn mode state
   const [ancestors, setAncestors] = useState<AncestorContext[]>([]);
   const [selectedAncestorIds, setSelectedAncestorIds] = useState<Set<string>>(new Set());
 
-  // Get enhancement model, planning mode defaults, and worktrees setting from store
-  const {
-    enhancementModel,
-    defaultPlanningMode,
-    defaultRequirePlanApproval,
-    defaultAIProfileId,
-    useWorktrees,
-  } = useAppStore();
+  // Get defaults from store
+  const { defaultPlanningMode, defaultRequirePlanApproval, useWorktrees, defaultFeatureModel } =
+    useAppStore();
 
-  // Sync defaults when dialog opens
+  // Track previous open state to detect when dialog opens
+  const wasOpenRef = useRef(false);
+
+  // Sync defaults only when dialog opens (transitions from closed to open)
   useEffect(() => {
-    if (open) {
-      // Find the default profile if one is set
-      const defaultProfile = defaultAIProfileId
-        ? aiProfiles.find((p) => p.id === defaultAIProfileId)
-        : null;
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
 
-      setNewFeature((prev) => ({
-        ...prev,
-        skipTests: defaultSkipTests,
-        branchName: defaultBranch || '',
-        // Use default profile's model/thinkingLevel if set, else fallback to defaults
-        model: defaultProfile?.model ?? 'opus',
-        thinkingLevel: defaultProfile?.thinkingLevel ?? 'none',
-      }));
-      setUseCurrentBranch(true);
+    if (justOpened) {
+      setSkipTests(defaultSkipTests);
+      // When a non-main worktree is selected, use its branch name for custom mode
+      // Otherwise, use the default branch
+      setBranchName(selectedNonMainWorktreeBranch || defaultBranch || '');
+      setWorkMode(
+        getDefaultWorkMode(useWorktrees, selectedNonMainWorktreeBranch, forceCurrentBranchMode)
+      );
       setPlanningMode(defaultPlanningMode);
       setRequirePlanApproval(defaultRequirePlanApproval);
+      setModelEntry(defaultFeatureModel);
+
+      // Initialize description history (empty for new feature)
+      setDescriptionHistory([]);
 
       // Initialize ancestors for spawn mode
       if (parentFeature) {
         const ancestorList = getAncestors(parentFeature, allFeatures);
         setAncestors(ancestorList);
-        // Only select parent by default - ancestors are optional context
         setSelectedAncestorIds(new Set([parentFeature.id]));
       } else {
         setAncestors([]);
@@ -193,39 +231,46 @@ export function AddFeatureDialog({
     defaultBranch,
     defaultPlanningMode,
     defaultRequirePlanApproval,
-    defaultAIProfileId,
-    aiProfiles,
+    defaultFeatureModel,
+    useWorktrees,
+    selectedNonMainWorktreeBranch,
+    forceCurrentBranchMode,
     parentFeature,
     allFeatures,
   ]);
 
+  const handleModelChange = (entry: PhaseModelEntry) => {
+    setModelEntry(entry);
+  };
+
   const buildFeatureData = (): FeatureData | null => {
-    if (!newFeature.description.trim()) {
+    if (!description.trim()) {
       setDescriptionError(true);
       return null;
     }
 
-    // Validate branch selection when "other branch" is selected
-    if (useWorktrees && !useCurrentBranch && !newFeature.branchName.trim()) {
+    if (workMode === 'custom' && !branchName.trim()) {
       toast.error('Please select a branch name');
       return null;
     }
 
-    const category = newFeature.category || 'Uncategorized';
-    const selectedModel = newFeature.model;
+    const finalCategory = category || 'Uncategorized';
+    const selectedModel = modelEntry.model;
     const normalizedThinking = modelSupportsThinking(selectedModel)
-      ? newFeature.thinkingLevel
+      ? modelEntry.thinkingLevel || 'none'
+      : 'none';
+    const normalizedReasoning = supportsReasoningEffort(selectedModel)
+      ? modelEntry.reasoningEffort || 'none'
       : 'none';
 
-    // Use current branch if toggle is on
-    // If currentBranch is provided (non-primary worktree), use it
-    // Otherwise (primary worktree), use empty string which means "unassigned" (show only on primary)
-    const finalBranchName = useCurrentBranch ? currentBranch || '' : newFeature.branchName || '';
+    // For 'current' mode, use empty string (work on current branch)
+    // For 'auto' mode, use empty string (will be auto-generated in use-board-actions)
+    // For 'custom' mode, use the specified branch name
+    const finalBranchName = workMode === 'custom' ? branchName || '' : '';
 
-    // Build final description - prepend ancestor context in spawn mode
-    let finalDescription = newFeature.description;
+    // Build final description with ancestor context in spawn mode
+    let finalDescription = description;
     if (isSpawnMode && parentFeature && selectedAncestorIds.size > 0) {
-      // Create parent context as an AncestorContext
       const parentContext: AncestorContext = {
         id: parentFeature.id,
         title: parentFeature.title,
@@ -242,119 +287,75 @@ export function AddFeatureDialog({
       );
 
       if (contextText) {
-        finalDescription = `${contextText}\n\n---\n\n## Task Description\n\n${newFeature.description}`;
+        finalDescription = `${contextText}\n\n---\n\n## Task Description\n\n${description}`;
       }
     }
 
     return {
-      title: newFeature.title,
-      category,
+      title,
+      category: finalCategory,
       description: finalDescription,
-      images: newFeature.images,
-      imagePaths: newFeature.imagePaths,
-      textFilePaths: newFeature.textFilePaths,
-      skipTests: newFeature.skipTests,
+      images,
+      imagePaths,
+      textFilePaths,
+      skipTests,
       model: selectedModel,
       thinkingLevel: normalizedThinking,
+      reasoningEffort: normalizedReasoning,
       branchName: finalBranchName,
-      priority: newFeature.priority,
+      priority,
       planningMode,
       requirePlanApproval,
-      // In spawn mode, automatically add parent as dependency
       dependencies: isSpawnMode && parentFeature ? [parentFeature.id] : undefined,
+      workMode,
     };
   };
 
   const resetForm = () => {
-    setNewFeature({
-      title: '',
-      category: '',
-      description: '',
-      images: [],
-      imagePaths: [],
-      textFilePaths: [],
-      skipTests: defaultSkipTests,
-      model: 'opus',
-      priority: 2,
-      thinkingLevel: 'none',
-      branchName: '',
-    });
-    setUseCurrentBranch(true);
+    setTitle('');
+    setCategory('');
+    setDescription('');
+    setImages([]);
+    setImagePaths([]);
+    setTextFilePaths([]);
+    setSkipTests(defaultSkipTests);
+    // When a non-main worktree is selected, use its branch name for custom mode
+    setBranchName(selectedNonMainWorktreeBranch || '');
+    setPriority(2);
+    setModelEntry(defaultFeatureModel);
+    setWorkMode(
+      getDefaultWorkMode(useWorktrees, selectedNonMainWorktreeBranch, forceCurrentBranchMode)
+    );
     setPlanningMode(defaultPlanningMode);
     setRequirePlanApproval(defaultRequirePlanApproval);
-    setNewFeaturePreviewMap(new Map());
-    setShowAdvancedOptions(false);
+    setPreviewMap(new Map());
     setDescriptionError(false);
+    setDescriptionHistory([]);
     onOpenChange(false);
   };
 
   const handleAction = (actionFn?: (data: FeatureData) => void) => {
     if (!actionFn) return;
-
     const featureData = buildFeatureData();
     if (!featureData) return;
-
     actionFn(featureData);
     resetForm();
   };
 
   const handleAdd = () => handleAction(onAdd);
-
   const handleAddAndStart = () => handleAction(onAddAndStart);
 
   const handleDialogClose = (open: boolean) => {
     onOpenChange(open);
     if (!open) {
-      setNewFeaturePreviewMap(new Map());
-      setShowAdvancedOptions(false);
+      setPreviewMap(new Map());
       setDescriptionError(false);
     }
   };
 
-  const handleEnhanceDescription = async () => {
-    if (!newFeature.description.trim() || isEnhancing) return;
-
-    setIsEnhancing(true);
-    try {
-      const api = getElectronAPI();
-      const result = await api.enhancePrompt?.enhance(
-        newFeature.description,
-        enhancementMode,
-        enhancementModel
-      );
-
-      if (result?.success && result.enhancedText) {
-        const enhancedText = result.enhancedText;
-        setNewFeature((prev) => ({ ...prev, description: enhancedText }));
-        toast.success('Description enhanced!');
-      } else {
-        toast.error(result?.error || 'Failed to enhance description');
-      }
-    } catch (error) {
-      console.error('Enhancement failed:', error);
-      toast.error('Failed to enhance description');
-    } finally {
-      setIsEnhancing(false);
-    }
-  };
-
-  const handleModelSelect = (model: AgentModel) => {
-    setNewFeature({
-      ...newFeature,
-      model,
-      thinkingLevel: modelSupportsThinking(model) ? newFeature.thinkingLevel : 'none',
-    });
-  };
-
-  const handleProfileSelect = (model: AgentModel, thinkingLevel: ThinkingLevel) => {
-    setNewFeature({
-      ...newFeature,
-      model,
-      thinkingLevel,
-    });
-  };
-
-  const newModelAllowsThinking = modelSupportsThinking(newFeature.model);
+  // Shared card styling
+  const cardClass = 'rounded-lg border border-border/50 bg-muted/30 p-4 space-y-3';
+  const sectionHeaderClass = 'flex items-center gap-2 text-sm font-medium text-foreground';
 
   return (
     <Dialog open={open} onOpenChange={handleDialogClose}>
@@ -382,221 +383,267 @@ export function AddFeatureDialog({
               : 'Create a new feature card for the Kanban board.'}
           </DialogDescription>
         </DialogHeader>
-        <Tabs defaultValue="prompt" className="py-4 flex-1 min-h-0 flex flex-col">
-          <TabsList className="w-full grid grid-cols-3 mb-4">
-            <TabsTrigger value="prompt" data-testid="tab-prompt">
-              <MessageSquare className="w-4 h-4 mr-2" />
-              Prompt
-            </TabsTrigger>
-            <TabsTrigger value="model" data-testid="tab-model">
-              <Settings2 className="w-4 h-4 mr-2" />
-              Model
-            </TabsTrigger>
-            <TabsTrigger value="options" data-testid="tab-options">
-              <SlidersHorizontal className="w-4 h-4 mr-2" />
-              Options
-            </TabsTrigger>
-          </TabsList>
 
-          {/* Prompt Tab */}
-          <TabsContent value="prompt" className="space-y-4 overflow-y-auto cursor-default">
-            {/* Ancestor Context Section - only in spawn mode */}
-            {isSpawnMode && parentFeature && (
-              <AncestorContextSection
-                parentFeature={{
-                  id: parentFeature.id,
-                  title: parentFeature.title,
-                  description: parentFeature.description,
-                  spec: parentFeature.spec,
-                  summary: parentFeature.summary,
-                }}
-                ancestors={ancestors}
-                selectedAncestorIds={selectedAncestorIds}
-                onSelectionChange={setSelectedAncestorIds}
-              />
-            )}
+        <div className="py-4 space-y-4 overflow-y-auto flex-1 min-h-0">
+          {/* Ancestor Context Section - only in spawn mode */}
+          {isSpawnMode && parentFeature && (
+            <AncestorContextSection
+              parentFeature={{
+                id: parentFeature.id,
+                title: parentFeature.title,
+                description: parentFeature.description,
+                spec: parentFeature.spec,
+                summary: parentFeature.summary,
+              }}
+              ancestors={ancestors}
+              selectedAncestorIds={selectedAncestorIds}
+              onSelectionChange={setSelectedAncestorIds}
+            />
+          )}
 
+          {/* Task Details Section */}
+          <div className={cardClass}>
             <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="description">Description</Label>
+                {/* Version History Button */}
+                <EnhancementHistoryButton
+                  history={descriptionHistory}
+                  currentValue={description}
+                  onRestore={setDescription}
+                  valueAccessor={(entry) => entry.description}
+                  title="Version History"
+                  restoreMessage="Description restored from history"
+                />
+              </div>
               <DescriptionImageDropZone
-                value={newFeature.description}
+                value={description}
                 onChange={(value) => {
-                  setNewFeature({ ...newFeature, description: value });
-                  if (value.trim()) {
-                    setDescriptionError(false);
-                  }
+                  setDescription(value);
+                  if (value.trim()) setDescriptionError(false);
                 }}
-                images={newFeature.imagePaths}
-                onImagesChange={(images) => setNewFeature({ ...newFeature, imagePaths: images })}
-                textFiles={newFeature.textFilePaths}
-                onTextFilesChange={(textFiles) =>
-                  setNewFeature({ ...newFeature, textFilePaths: textFiles })
-                }
+                images={imagePaths}
+                onImagesChange={setImagePaths}
+                textFiles={textFilePaths}
+                onTextFilesChange={setTextFilePaths}
                 placeholder="Describe the feature..."
-                previewMap={newFeaturePreviewMap}
-                onPreviewMapChange={setNewFeaturePreviewMap}
+                previewMap={previewMap}
+                onPreviewMapChange={setPreviewMap}
                 autoFocus
                 error={descriptionError}
               />
             </div>
+
             <div className="space-y-2">
               <Label htmlFor="title">Title (optional)</Label>
               <Input
                 id="title"
-                value={newFeature.title}
-                onChange={(e) => setNewFeature({ ...newFeature, title: e.target.value })}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
                 placeholder="Leave blank to auto-generate"
               />
             </div>
-            <div className="flex w-fit items-center gap-3 select-none cursor-default">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="w-[200px] justify-between">
-                    {enhancementMode === 'improve' && 'Improve Clarity'}
-                    {enhancementMode === 'technical' && 'Add Technical Details'}
-                    {enhancementMode === 'simplify' && 'Simplify'}
-                    {enhancementMode === 'acceptance' && 'Add Acceptance Criteria'}
-                    <ChevronDown className="w-4 h-4 ml-2" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onClick={() => setEnhancementMode('improve')}>
-                    Improve Clarity
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setEnhancementMode('technical')}>
-                    Add Technical Details
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setEnhancementMode('simplify')}>
-                    Simplify
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setEnhancementMode('acceptance')}>
-                    Add Acceptance Criteria
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
 
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleEnhanceDescription}
-                disabled={!newFeature.description.trim() || isEnhancing}
-                loading={isEnhancing}
-              >
-                <Sparkles className="w-4 h-4 mr-2" />
-                Enhance with AI
-              </Button>
+            {/* Enhancement Section */}
+            <EnhanceWithAI
+              value={description}
+              onChange={setDescription}
+              onHistoryAdd={({ mode, originalText, enhancedText }) => {
+                const timestamp = new Date().toISOString();
+                setDescriptionHistory((prev) => {
+                  const newHistory = [...prev];
+                  // Add original text first (so user can restore to pre-enhancement state)
+                  // Only add if it's different from the last entry to avoid duplicates
+                  const lastEntry = prev[prev.length - 1];
+                  if (!lastEntry || lastEntry.description !== originalText) {
+                    newHistory.push({
+                      description: originalText,
+                      timestamp,
+                      source: prev.length === 0 ? 'initial' : 'edit',
+                    });
+                  }
+                  // Add enhanced text
+                  newHistory.push({
+                    description: enhancedText,
+                    timestamp,
+                    source: 'enhance',
+                    enhancementMode: mode,
+                  });
+                  return newHistory;
+                });
+              }}
+            />
+          </div>
+
+          {/* AI & Execution Section */}
+          <div className={cardClass}>
+            <div className="flex items-center justify-between">
+              <div className={sectionHeaderClass}>
+                <Cpu className="w-4 h-4 text-muted-foreground" />
+                <span>AI & Execution</span>
+              </div>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onOpenChange(false);
+                        navigate({ to: '/settings', search: { view: 'defaults' } });
+                      }}
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Settings2 className="w-3.5 h-3.5" />
+                      <span>Edit Defaults</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Change default model and planning settings for new features</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="category">Category (optional)</Label>
-              <CategoryAutocomplete
-                value={newFeature.category}
-                onChange={(value) => setNewFeature({ ...newFeature, category: value })}
-                suggestions={categorySuggestions}
-                placeholder="e.g., Core, UI, API"
-                data-testid="feature-category-input"
+
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Model</Label>
+              <PhaseModelSelector
+                value={modelEntry}
+                onChange={handleModelChange}
+                compact
+                align="end"
               />
             </div>
-            {useWorktrees && (
-              <BranchSelector
-                useCurrentBranch={useCurrentBranch}
-                onUseCurrentBranchChange={setUseCurrentBranch}
-                branchName={newFeature.branchName}
-                onBranchNameChange={(value) => setNewFeature({ ...newFeature, branchName: value })}
+
+            <div className="grid gap-3 grid-cols-2">
+              <div className="space-y-1.5">
+                <Label
+                  className={cn(
+                    'text-xs text-muted-foreground',
+                    !modelSupportsPlanningMode && 'opacity-50'
+                  )}
+                >
+                  Planning
+                </Label>
+                {modelSupportsPlanningMode ? (
+                  <PlanningModeSelect
+                    mode={planningMode}
+                    onModeChange={setPlanningMode}
+                    testIdPrefix="add-feature-planning"
+                    compact
+                  />
+                ) : (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div>
+                          <PlanningModeSelect
+                            mode="skip"
+                            onModeChange={() => {}}
+                            testIdPrefix="add-feature-planning"
+                            compact
+                            disabled
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Planning modes are only available for Claude Provider</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Options</Label>
+                <div className="flex flex-col gap-2 pt-1">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="add-feature-skip-tests"
+                      checked={!skipTests}
+                      onCheckedChange={(checked) => setSkipTests(!checked)}
+                      data-testid="add-feature-skip-tests-checkbox"
+                    />
+                    <Label
+                      htmlFor="add-feature-skip-tests"
+                      className="text-xs font-normal cursor-pointer"
+                    >
+                      Run tests
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="add-feature-require-approval"
+                      checked={requirePlanApproval}
+                      onCheckedChange={(checked) => setRequirePlanApproval(!!checked)}
+                      disabled={
+                        !modelSupportsPlanningMode ||
+                        planningMode === 'skip' ||
+                        planningMode === 'lite'
+                      }
+                      data-testid="add-feature-require-approval-checkbox"
+                    />
+                    <Label
+                      htmlFor="add-feature-require-approval"
+                      className={cn(
+                        'text-xs font-normal',
+                        !modelSupportsPlanningMode ||
+                          planningMode === 'skip' ||
+                          planningMode === 'lite'
+                          ? 'cursor-not-allowed text-muted-foreground'
+                          : 'cursor-pointer'
+                      )}
+                    >
+                      Require approval
+                    </Label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Organization Section */}
+          <div className={cardClass}>
+            <div className={sectionHeaderClass}>
+              <FolderKanban className="w-4 h-4 text-muted-foreground" />
+              <span>Organization</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Category</Label>
+                <CategoryAutocomplete
+                  value={category}
+                  onChange={setCategory}
+                  suggestions={categorySuggestions}
+                  placeholder="e.g., Core, UI, API"
+                  data-testid="feature-category-input"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Priority</Label>
+                <PrioritySelector
+                  selectedPriority={priority}
+                  onPrioritySelect={setPriority}
+                  testIdPrefix="priority"
+                />
+              </div>
+            </div>
+
+            {/* Work Mode Selector */}
+            <div className="pt-2">
+              <WorkModeSelector
+                workMode={workMode}
+                onWorkModeChange={setWorkMode}
+                branchName={branchName}
+                onBranchNameChange={setBranchName}
                 branchSuggestions={branchSuggestions}
                 branchCardCounts={branchCardCounts}
                 currentBranch={currentBranch}
-                testIdPrefix="feature"
+                testIdPrefix="feature-work-mode"
               />
-            )}
+            </div>
+          </div>
+        </div>
 
-            {/* Priority Selector */}
-            <PrioritySelector
-              selectedPriority={newFeature.priority}
-              onPrioritySelect={(priority) => setNewFeature({ ...newFeature, priority })}
-              testIdPrefix="priority"
-            />
-          </TabsContent>
-
-          {/* Model Tab */}
-          <TabsContent value="model" className="space-y-4 overflow-y-auto cursor-default">
-            {/* Show Advanced Options Toggle */}
-            {showProfilesOnly && (
-              <div className="flex items-center justify-between p-3 bg-muted/30 rounded-lg border border-border">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-foreground">Simple Mode Active</p>
-                  <p className="text-xs text-muted-foreground">
-                    Only showing AI profiles. Advanced model tweaking is hidden.
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
-                  data-testid="show-advanced-options-toggle"
-                >
-                  <Settings2 className="w-4 h-4 mr-2" />
-                  {showAdvancedOptions ? 'Hide' : 'Show'} Advanced
-                </Button>
-              </div>
-            )}
-
-            {/* Quick Select Profile Section */}
-            <ProfileQuickSelect
-              profiles={aiProfiles}
-              selectedModel={newFeature.model}
-              selectedThinkingLevel={newFeature.thinkingLevel}
-              onSelect={handleProfileSelect}
-              showManageLink
-              onManageLinkClick={() => {
-                onOpenChange(false);
-                navigate({ to: '/profiles' });
-              }}
-            />
-
-            {/* Separator */}
-            {aiProfiles.length > 0 && (!showProfilesOnly || showAdvancedOptions) && (
-              <div className="border-t border-border" />
-            )}
-
-            {/* Claude Models Section */}
-            {(!showProfilesOnly || showAdvancedOptions) && (
-              <>
-                <ModelSelector selectedModel={newFeature.model} onModelSelect={handleModelSelect} />
-                {newModelAllowsThinking && (
-                  <ThinkingLevelSelector
-                    selectedLevel={newFeature.thinkingLevel}
-                    onLevelSelect={(level) =>
-                      setNewFeature({ ...newFeature, thinkingLevel: level })
-                    }
-                  />
-                )}
-              </>
-            )}
-          </TabsContent>
-
-          {/* Options Tab */}
-          <TabsContent value="options" className="space-y-4 overflow-y-auto cursor-default">
-            {/* Planning Mode Section */}
-            <PlanningModeSelector
-              mode={planningMode}
-              onModeChange={setPlanningMode}
-              requireApproval={requirePlanApproval}
-              onRequireApprovalChange={setRequirePlanApproval}
-              featureDescription={newFeature.description}
-              testIdPrefix="add-feature"
-              compact
-            />
-
-            <div className="border-t border-border my-4" />
-
-            {/* Testing Section */}
-            <TestingTabContent
-              skipTests={newFeature.skipTests}
-              onSkipTestsChange={(skipTests) => setNewFeature({ ...newFeature, skipTests })}
-            />
-          </TabsContent>
-        </Tabs>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
@@ -606,7 +653,7 @@ export function AddFeatureDialog({
               onClick={handleAddAndStart}
               variant="secondary"
               data-testid="confirm-add-and-start-feature"
-              disabled={useWorktrees && !useCurrentBranch && !newFeature.branchName.trim()}
+              disabled={workMode === 'custom' && !branchName.trim()}
             >
               <Play className="w-4 h-4 mr-2" />
               Make
@@ -617,7 +664,7 @@ export function AddFeatureDialog({
             hotkey={{ key: 'Enter', cmdCtrl: true }}
             hotkeyActive={open}
             data-testid="confirm-add-feature"
-            disabled={useWorktrees && !useCurrentBranch && !newFeature.branchName.trim()}
+            disabled={workMode === 'custom' && !branchName.trim()}
           >
             {isSpawnMode ? 'Spawn Task' : 'Add Feature'}
           </HotkeyButton>

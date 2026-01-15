@@ -5,11 +5,13 @@ import { RefreshCw, AlertTriangle, CheckCircle, XCircle, Clock, ExternalLink } f
 import { cn } from '@/lib/utils';
 import { getElectronAPI } from '@/lib/electron';
 import { useAppStore } from '@/store/app-store';
+import { useSetupStore } from '@/store/setup-store';
 
 // Error codes for distinguishing failure modes
 const ERROR_CODES = {
   API_BRIDGE_UNAVAILABLE: 'API_BRIDGE_UNAVAILABLE',
   AUTH_ERROR: 'AUTH_ERROR',
+  TRUST_PROMPT: 'TRUST_PROMPT',
   UNKNOWN: 'UNKNOWN',
 } as const;
 
@@ -25,9 +27,14 @@ const REFRESH_INTERVAL_SECONDS = 45;
 
 export function ClaudeUsagePopover() {
   const { claudeUsage, claudeUsageLastUpdated, setClaudeUsage } = useAppStore();
+  const claudeAuthStatus = useSetupStore((state) => state.claudeAuthStatus);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<UsageError | null>(null);
+
+  // Check if CLI is verified/authenticated
+  const isCliVerified =
+    claudeAuthStatus?.authenticated && claudeAuthStatus?.method === 'cli_authenticated';
 
   // Check if data is stale (older than 2 minutes) - recalculates when claudeUsageLastUpdated changes
   const isStale = useMemo(() => {
@@ -49,8 +56,12 @@ export function ClaudeUsagePopover() {
         }
         const data = await api.claude.getUsage();
         if ('error' in data) {
+          // Detect trust prompt error
+          const isTrustPrompt =
+            data.error === 'Trust prompt pending' ||
+            (data.message && data.message.includes('folder permission'));
           setError({
-            code: ERROR_CODES.AUTH_ERROR,
+            code: isTrustPrompt ? ERROR_CODES.TRUST_PROMPT : ERROR_CODES.AUTH_ERROR,
             message: data.message || data.error,
           });
           return;
@@ -68,14 +79,17 @@ export function ClaudeUsagePopover() {
     [setClaudeUsage]
   );
 
-  // Auto-fetch on mount if data is stale
+  // Auto-fetch on mount if data is stale (only if CLI is verified)
   useEffect(() => {
-    if (isStale) {
+    if (isStale && isCliVerified) {
       fetchUsage(true);
     }
-  }, [isStale, fetchUsage]);
+  }, [isStale, isCliVerified, fetchUsage]);
 
   useEffect(() => {
+    // Skip if CLI is not verified
+    if (!isCliVerified) return;
+
     // Initial fetch when opened
     if (open) {
       if (!claudeUsage || isStale) {
@@ -94,7 +108,7 @@ export function ClaudeUsagePopover() {
     return () => {
       if (intervalId) clearInterval(intervalId);
     };
-  }, [open, claudeUsage, isStale, fetchUsage]);
+  }, [open, claudeUsage, isStale, isCliVerified, fetchUsage]);
 
   // Derived status color/icon helper
   const getStatusInfo = (percentage: number) => {
@@ -248,6 +262,11 @@ export function ClaudeUsagePopover() {
                 <p className="text-xs text-muted-foreground">
                   {error.code === ERROR_CODES.API_BRIDGE_UNAVAILABLE ? (
                     'Ensure the Electron bridge is running or restart the app'
+                  ) : error.code === ERROR_CODES.TRUST_PROMPT ? (
+                    <>
+                      Run <code className="font-mono bg-muted px-1 rounded">claude</code> in your
+                      terminal and approve access to continue
+                    </>
                   ) : (
                     <>
                       Make sure Claude CLI is installed and authenticated via{' '}

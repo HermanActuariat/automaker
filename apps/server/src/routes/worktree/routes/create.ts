@@ -12,14 +12,21 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 import * as secureFs from '../../../lib/secure-fs.js';
+import type { EventEmitter } from '../../../lib/events.js';
+import { isGitRepo } from '@automaker/git-utils';
 import {
-  isGitRepo,
   getErrorMessage,
   logError,
   normalizePath,
   ensureInitialCommit,
+  isValidBranchName,
+  execGitCommand,
 } from '../common.js';
 import { trackBranch } from './branch-tracking.js';
+import { createLogger } from '@automaker/utils';
+import { runInitScript } from '../../../services/init-script-service.js';
+
+const logger = createLogger('Worktree');
 
 const execAsync = promisify(exec);
 
@@ -74,7 +81,7 @@ async function findExistingWorktreeForBranch(
   }
 }
 
-export function createCreateHandler() {
+export function createCreateHandler(events: EventEmitter) {
   return async (req: Request, res: Response): Promise<void> => {
     try {
       const { projectPath, branchName, baseBranch } = req.body as {
@@ -91,6 +98,26 @@ export function createCreateHandler() {
         return;
       }
 
+      // Validate branch name to prevent command injection
+      if (!isValidBranchName(branchName)) {
+        res.status(400).json({
+          success: false,
+          error:
+            'Invalid branch name. Branch names must contain only letters, numbers, dots, hyphens, underscores, and forward slashes.',
+        });
+        return;
+      }
+
+      // Validate base branch if provided
+      if (baseBranch && !isValidBranchName(baseBranch) && baseBranch !== 'HEAD') {
+        res.status(400).json({
+          success: false,
+          error:
+            'Invalid base branch name. Branch names must contain only letters, numbers, dots, hyphens, underscores, and forward slashes.',
+        });
+        return;
+      }
+
       if (!(await isGitRepo(projectPath))) {
         res.status(400).json({
           success: false,
@@ -100,15 +127,22 @@ export function createCreateHandler() {
       }
 
       // Ensure the repository has at least one commit so worktree commands referencing HEAD succeed
-      await ensureInitialCommit(projectPath);
+      // Pass git identity env vars so commits work without global git config
+      const gitEnv = {
+        GIT_AUTHOR_NAME: 'Automaker',
+        GIT_AUTHOR_EMAIL: 'automaker@localhost',
+        GIT_COMMITTER_NAME: 'Automaker',
+        GIT_COMMITTER_EMAIL: 'automaker@localhost',
+      };
+      await ensureInitialCommit(projectPath, gitEnv);
 
       // First, check if git already has a worktree for this branch (anywhere)
       const existingWorktree = await findExistingWorktreeForBranch(projectPath, branchName);
       if (existingWorktree) {
         // Worktree already exists, return it as success (not an error)
         // This handles manually created worktrees or worktrees from previous runs
-        console.log(
-          `[Worktree] Found existing worktree for branch "${branchName}" at: ${existingWorktree.path}`
+        logger.info(
+          `Found existing worktree for branch "${branchName}" at: ${existingWorktree.path}`
         );
 
         // Track the branch so it persists in the UI
@@ -133,29 +167,27 @@ export function createCreateHandler() {
       // Create worktrees directory if it doesn't exist
       await secureFs.mkdir(worktreesDir, { recursive: true });
 
-      // Check if branch exists
+      // Check if branch exists (using array arguments to prevent injection)
       let branchExists = false;
       try {
-        await execAsync(`git rev-parse --verify ${branchName}`, {
-          cwd: projectPath,
-        });
+        await execGitCommand(['rev-parse', '--verify', branchName], projectPath);
         branchExists = true;
       } catch {
         // Branch doesn't exist
       }
 
-      // Create worktree
-      let createCmd: string;
+      // Create worktree (using array arguments to prevent injection)
       if (branchExists) {
         // Use existing branch
-        createCmd = `git worktree add "${worktreePath}" ${branchName}`;
+        await execGitCommand(['worktree', 'add', worktreePath, branchName], projectPath);
       } else {
         // Create new branch from base or HEAD
         const base = baseBranch || 'HEAD';
-        createCmd = `git worktree add -b ${branchName} "${worktreePath}" ${base}`;
+        await execGitCommand(
+          ['worktree', 'add', '-b', branchName, worktreePath, base],
+          projectPath
+        );
       }
-
-      await execAsync(createCmd, { cwd: projectPath });
 
       // Note: We intentionally do NOT symlink .automaker to worktrees
       // Features and config are always accessed from the main project path
@@ -167,6 +199,8 @@ export function createCreateHandler() {
       // Resolve to absolute path for cross-platform compatibility
       // normalizePath converts to forward slashes for API consistency
       const absoluteWorktreePath = path.resolve(worktreePath);
+
+      // Respond immediately (non-blocking)
       res.json({
         success: true,
         worktree: {
@@ -174,6 +208,17 @@ export function createCreateHandler() {
           branch: branchName,
           isNew: !branchExists,
         },
+      });
+
+      // Trigger init script asynchronously after response
+      // runInitScript internally checks if script exists and hasn't already run
+      runInitScript({
+        projectPath,
+        worktreePath: absoluteWorktreePath,
+        branch: branchName,
+        emitter: events,
+      }).catch((err) => {
+        logger.error(`Init script failed for ${branchName}:`, err);
       });
     } catch (error) {
       logError(error, 'Create worktree failed');

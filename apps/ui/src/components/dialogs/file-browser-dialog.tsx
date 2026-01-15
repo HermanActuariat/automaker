@@ -11,9 +11,10 @@ import {
 import { Button } from '@/components/ui/button';
 import { PathInput } from '@/components/ui/path-input';
 import { Kbd, KbdGroup } from '@/components/ui/kbd';
-import { getJSON, setJSON } from '@/lib/storage';
 import { getDefaultWorkspaceDirectory, saveLastProjectDirectory } from '@/lib/workspace-config';
 import { useOSDetection } from '@/hooks';
+import { apiPost } from '@/lib/api-fetch';
+import { useAppStore } from '@/store/app-store';
 
 interface DirectoryEntry {
   name: string;
@@ -39,27 +40,7 @@ interface FileBrowserDialogProps {
   initialPath?: string;
 }
 
-const RECENT_FOLDERS_KEY = 'file-browser-recent-folders';
 const MAX_RECENT_FOLDERS = 5;
-
-function getRecentFolders(): string[] {
-  return getJSON<string[]>(RECENT_FOLDERS_KEY) ?? [];
-}
-
-function addRecentFolder(path: string): void {
-  const recent = getRecentFolders();
-  // Remove if already exists, then add to front
-  const filtered = recent.filter((p) => p !== path);
-  const updated = [path, ...filtered].slice(0, MAX_RECENT_FOLDERS);
-  setJSON(RECENT_FOLDERS_KEY, updated);
-}
-
-function removeRecentFolder(path: string): string[] {
-  const recent = getRecentFolders();
-  const updated = recent.filter((p) => p !== path);
-  setJSON(RECENT_FOLDERS_KEY, updated);
-  return updated;
-}
 
 export function FileBrowserDialog({
   open,
@@ -77,20 +58,20 @@ export function FileBrowserDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [warning, setWarning] = useState('');
-  const [recentFolders, setRecentFolders] = useState<string[]>([]);
 
-  // Load recent folders when dialog opens
-  useEffect(() => {
-    if (open) {
-      setRecentFolders(getRecentFolders());
-    }
-  }, [open]);
+  // Use recent folders from app store (synced via API)
+  const recentFolders = useAppStore((s) => s.recentFolders);
+  const setRecentFolders = useAppStore((s) => s.setRecentFolders);
+  const addRecentFolder = useAppStore((s) => s.addRecentFolder);
 
-  const handleRemoveRecent = useCallback((e: React.MouseEvent, path: string) => {
-    e.stopPropagation();
-    const updated = removeRecentFolder(path);
-    setRecentFolders(updated);
-  }, []);
+  const handleRemoveRecent = useCallback(
+    (e: React.MouseEvent, path: string) => {
+      e.stopPropagation();
+      const updated = recentFolders.filter((p) => p !== path);
+      setRecentFolders(updated);
+    },
+    [recentFolders, setRecentFolders]
+  );
 
   const browseDirectory = useCallback(async (dirPath?: string) => {
     setLoading(true);
@@ -98,16 +79,7 @@ export function FileBrowserDialog({
     setWarning('');
 
     try {
-      // Get server URL from environment or default
-      const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3008';
-
-      const response = await fetch(`${serverUrl}/api/fs/browse`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dirPath }),
-      });
-
-      const result: BrowseResult = await response.json();
+      const result = await apiPost<BrowseResult>('/api/fs/browse', { dirPath });
 
       if (result.success) {
         setCurrentPath(result.currentPath);

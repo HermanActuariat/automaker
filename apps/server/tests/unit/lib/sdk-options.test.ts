@@ -179,19 +179,15 @@ describe('sdk-options.ts', () => {
     it('should create options with chat settings', async () => {
       const { createChatOptions, TOOL_PRESETS, MAX_TURNS } = await import('@/lib/sdk-options.js');
 
-      const options = createChatOptions({ cwd: '/test/path', enableSandboxMode: true });
+      const options = createChatOptions({ cwd: '/test/path' });
 
       expect(options.cwd).toBe('/test/path');
       expect(options.maxTurns).toBe(MAX_TURNS.standard);
       expect(options.allowedTools).toEqual([...TOOL_PRESETS.chat]);
-      expect(options.sandbox).toEqual({
-        enabled: true,
-        autoAllowBashIfSandboxed: true,
-      });
     });
 
     it('should prefer explicit model over session model', async () => {
-      const { createChatOptions, getModelForUseCase } = await import('@/lib/sdk-options.js');
+      const { createChatOptions } = await import('@/lib/sdk-options.js');
 
       const options = createChatOptions({
         cwd: '/test/path',
@@ -212,27 +208,6 @@ describe('sdk-options.ts', () => {
 
       expect(options.model).toBe('claude-sonnet-4-20250514');
     });
-
-    it('should not set sandbox when enableSandboxMode is false', async () => {
-      const { createChatOptions } = await import('@/lib/sdk-options.js');
-
-      const options = createChatOptions({
-        cwd: '/test/path',
-        enableSandboxMode: false,
-      });
-
-      expect(options.sandbox).toBeUndefined();
-    });
-
-    it('should not set sandbox when enableSandboxMode is not provided', async () => {
-      const { createChatOptions } = await import('@/lib/sdk-options.js');
-
-      const options = createChatOptions({
-        cwd: '/test/path',
-      });
-
-      expect(options.sandbox).toBeUndefined();
-    });
   });
 
   describe('createAutoModeOptions', () => {
@@ -240,15 +215,11 @@ describe('sdk-options.ts', () => {
       const { createAutoModeOptions, TOOL_PRESETS, MAX_TURNS } =
         await import('@/lib/sdk-options.js');
 
-      const options = createAutoModeOptions({ cwd: '/test/path', enableSandboxMode: true });
+      const options = createAutoModeOptions({ cwd: '/test/path' });
 
       expect(options.cwd).toBe('/test/path');
       expect(options.maxTurns).toBe(MAX_TURNS.maximum);
       expect(options.allowedTools).toEqual([...TOOL_PRESETS.fullAccess]);
-      expect(options.sandbox).toEqual({
-        enabled: true,
-        autoAllowBashIfSandboxed: true,
-      });
     });
 
     it('should include systemPrompt when provided', async () => {
@@ -272,27 +243,6 @@ describe('sdk-options.ts', () => {
       });
 
       expect(options.abortController).toBe(abortController);
-    });
-
-    it('should not set sandbox when enableSandboxMode is false', async () => {
-      const { createAutoModeOptions } = await import('@/lib/sdk-options.js');
-
-      const options = createAutoModeOptions({
-        cwd: '/test/path',
-        enableSandboxMode: false,
-      });
-
-      expect(options.sandbox).toBeUndefined();
-    });
-
-    it('should not set sandbox when enableSandboxMode is not provided', async () => {
-      const { createAutoModeOptions } = await import('@/lib/sdk-options.js');
-
-      const options = createAutoModeOptions({
-        cwd: '/test/path',
-      });
-
-      expect(options.sandbox).toBeUndefined();
     });
   });
 
@@ -304,13 +254,11 @@ describe('sdk-options.ts', () => {
         cwd: '/test/path',
         maxTurns: 10,
         allowedTools: ['Read', 'Write'],
-        sandbox: { enabled: true },
       });
 
       expect(options.cwd).toBe('/test/path');
       expect(options.maxTurns).toBe(10);
       expect(options.allowedTools).toEqual(['Read', 'Write']);
-      expect(options.sandbox).toEqual({ enabled: true });
     });
 
     it('should use defaults when optional params not provided', async () => {
@@ -320,20 +268,6 @@ describe('sdk-options.ts', () => {
 
       expect(options.maxTurns).toBe(MAX_TURNS.maximum);
       expect(options.allowedTools).toEqual([...TOOL_PRESETS.readOnly]);
-    });
-
-    it('should include sandbox when provided', async () => {
-      const { createCustomOptions } = await import('@/lib/sdk-options.js');
-
-      const options = createCustomOptions({
-        cwd: '/test/path',
-        sandbox: { enabled: true, autoAllowBashIfSandboxed: false },
-      });
-
-      expect(options.sandbox).toEqual({
-        enabled: true,
-        autoAllowBashIfSandboxed: false,
-      });
     });
 
     it('should include systemPrompt when provided', async () => {
@@ -357,6 +291,205 @@ describe('sdk-options.ts', () => {
       });
 
       expect(options.abortController).toBe(abortController);
+    });
+  });
+
+  describe('getThinkingTokenBudget (from @automaker/types)', () => {
+    it('should return undefined for "none" thinking level', async () => {
+      const { getThinkingTokenBudget } = await import('@automaker/types');
+      expect(getThinkingTokenBudget('none')).toBeUndefined();
+    });
+
+    it('should return undefined for undefined thinking level', async () => {
+      const { getThinkingTokenBudget } = await import('@automaker/types');
+      expect(getThinkingTokenBudget(undefined)).toBeUndefined();
+    });
+
+    it('should return 1024 for "low" thinking level', async () => {
+      const { getThinkingTokenBudget } = await import('@automaker/types');
+      expect(getThinkingTokenBudget('low')).toBe(1024);
+    });
+
+    it('should return 10000 for "medium" thinking level', async () => {
+      const { getThinkingTokenBudget } = await import('@automaker/types');
+      expect(getThinkingTokenBudget('medium')).toBe(10000);
+    });
+
+    it('should return 16000 for "high" thinking level', async () => {
+      const { getThinkingTokenBudget } = await import('@automaker/types');
+      expect(getThinkingTokenBudget('high')).toBe(16000);
+    });
+
+    it('should return 32000 for "ultrathink" thinking level', async () => {
+      const { getThinkingTokenBudget } = await import('@automaker/types');
+      expect(getThinkingTokenBudget('ultrathink')).toBe(32000);
+    });
+  });
+
+  describe('THINKING_TOKEN_BUDGET constant', () => {
+    it('should have correct values for all thinking levels', async () => {
+      const { THINKING_TOKEN_BUDGET } = await import('@automaker/types');
+
+      expect(THINKING_TOKEN_BUDGET.none).toBeUndefined();
+      expect(THINKING_TOKEN_BUDGET.low).toBe(1024);
+      expect(THINKING_TOKEN_BUDGET.medium).toBe(10000);
+      expect(THINKING_TOKEN_BUDGET.high).toBe(16000);
+      expect(THINKING_TOKEN_BUDGET.ultrathink).toBe(32000);
+    });
+
+    it('should have minimum of 1024 for enabled thinking levels', async () => {
+      const { THINKING_TOKEN_BUDGET } = await import('@automaker/types');
+
+      // Per Claude SDK docs: minimum is 1024 tokens
+      expect(THINKING_TOKEN_BUDGET.low).toBeGreaterThanOrEqual(1024);
+      expect(THINKING_TOKEN_BUDGET.medium).toBeGreaterThanOrEqual(1024);
+      expect(THINKING_TOKEN_BUDGET.high).toBeGreaterThanOrEqual(1024);
+      expect(THINKING_TOKEN_BUDGET.ultrathink).toBeGreaterThanOrEqual(1024);
+    });
+
+    it('should have ultrathink at or below 32000 to avoid timeouts', async () => {
+      const { THINKING_TOKEN_BUDGET } = await import('@automaker/types');
+
+      // Per Claude SDK docs: above 32000 risks timeouts
+      expect(THINKING_TOKEN_BUDGET.ultrathink).toBeLessThanOrEqual(32000);
+    });
+  });
+
+  describe('thinking level integration with SDK options', () => {
+    describe('createSpecGenerationOptions with thinkingLevel', () => {
+      it('should not include maxThinkingTokens when thinkingLevel is undefined', async () => {
+        const { createSpecGenerationOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createSpecGenerationOptions({ cwd: '/test/path' });
+
+        expect(options.maxThinkingTokens).toBeUndefined();
+      });
+
+      it('should not include maxThinkingTokens when thinkingLevel is "none"', async () => {
+        const { createSpecGenerationOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createSpecGenerationOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'none',
+        });
+
+        expect(options.maxThinkingTokens).toBeUndefined();
+      });
+
+      it('should include maxThinkingTokens for "low" thinkingLevel', async () => {
+        const { createSpecGenerationOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createSpecGenerationOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'low',
+        });
+
+        expect(options.maxThinkingTokens).toBe(1024);
+      });
+
+      it('should include maxThinkingTokens for "high" thinkingLevel', async () => {
+        const { createSpecGenerationOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createSpecGenerationOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'high',
+        });
+
+        expect(options.maxThinkingTokens).toBe(16000);
+      });
+
+      it('should include maxThinkingTokens for "ultrathink" thinkingLevel', async () => {
+        const { createSpecGenerationOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createSpecGenerationOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'ultrathink',
+        });
+
+        expect(options.maxThinkingTokens).toBe(32000);
+      });
+    });
+
+    describe('createAutoModeOptions with thinkingLevel', () => {
+      it('should not include maxThinkingTokens when thinkingLevel is undefined', async () => {
+        const { createAutoModeOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createAutoModeOptions({ cwd: '/test/path' });
+
+        expect(options.maxThinkingTokens).toBeUndefined();
+      });
+
+      it('should include maxThinkingTokens for "medium" thinkingLevel', async () => {
+        const { createAutoModeOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createAutoModeOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'medium',
+        });
+
+        expect(options.maxThinkingTokens).toBe(10000);
+      });
+
+      it('should include maxThinkingTokens for "ultrathink" thinkingLevel', async () => {
+        const { createAutoModeOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createAutoModeOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'ultrathink',
+        });
+
+        expect(options.maxThinkingTokens).toBe(32000);
+      });
+    });
+
+    describe('createChatOptions with thinkingLevel', () => {
+      it('should include maxThinkingTokens for enabled thinkingLevel', async () => {
+        const { createChatOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createChatOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'high',
+        });
+
+        expect(options.maxThinkingTokens).toBe(16000);
+      });
+    });
+
+    describe('createSuggestionsOptions with thinkingLevel', () => {
+      it('should include maxThinkingTokens for enabled thinkingLevel', async () => {
+        const { createSuggestionsOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createSuggestionsOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'low',
+        });
+
+        expect(options.maxThinkingTokens).toBe(1024);
+      });
+    });
+
+    describe('createCustomOptions with thinkingLevel', () => {
+      it('should include maxThinkingTokens for enabled thinkingLevel', async () => {
+        const { createCustomOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createCustomOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'medium',
+        });
+
+        expect(options.maxThinkingTokens).toBe(10000);
+      });
+
+      it('should not include maxThinkingTokens when thinkingLevel is "none"', async () => {
+        const { createCustomOptions } = await import('@/lib/sdk-options.js');
+
+        const options = createCustomOptions({
+          cwd: '/test/path',
+          thinkingLevel: 'none',
+        });
+
+        expect(options.maxThinkingTokens).toBeUndefined();
+      });
     });
   });
 });

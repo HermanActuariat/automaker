@@ -1,4 +1,6 @@
+// @ts-nocheck
 import { useState, useEffect } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import {
   Dialog,
   DialogContent,
@@ -7,11 +9,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { HotkeyButton } from '@/components/ui/hotkey-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import { CategoryAutocomplete } from '@/components/ui/category-autocomplete';
 import {
   DescriptionImageDropZone,
@@ -19,41 +21,28 @@ import {
   FeatureTextFilePath as DescriptionTextFilePath,
   ImagePreviewMap,
 } from '@/components/ui/description-image-dropzone';
-import {
-  MessageSquare,
-  Settings2,
-  SlidersHorizontal,
-  Sparkles,
-  ChevronDown,
-  GitBranch,
-} from 'lucide-react';
+import { GitBranch, Cpu, FolderKanban, Settings2 } from 'lucide-react';
+import { useNavigate } from '@tanstack/react-router';
 import { toast } from 'sonner';
-import { getElectronAPI } from '@/lib/electron';
-import { modelSupportsThinking } from '@/lib/utils';
+import { cn, modelSupportsThinking } from '@/lib/utils';
+import { Feature, ModelAlias, ThinkingLevel, useAppStore, PlanningMode } from '@/store/app-store';
+import type { ReasoningEffort, PhaseModelEntry, DescriptionHistoryEntry } from '@automaker/types';
 import {
-  Feature,
-  AgentModel,
-  ThinkingLevel,
-  AIProfile,
-  useAppStore,
-  PlanningMode,
-} from '@/store/app-store';
-import {
-  ModelSelector,
-  ThinkingLevelSelector,
-  ProfileQuickSelect,
   TestingTabContent,
   PrioritySelector,
-  BranchSelector,
-  PlanningModeSelector,
+  WorkModeSelector,
+  PlanningModeSelect,
+  EnhanceWithAI,
+  EnhancementHistoryButton,
+  type EnhancementMode,
 } from '../shared';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import type { WorkMode } from '../shared';
+import { PhaseModelSelector } from '@/components/views/settings-view/model-defaults/phase-model-selector';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { DependencyTreeDialog } from './dependency-tree-dialog';
+import { isClaudeModel, supportsReasoningEffort } from '@automaker/types';
+
+const logger = createLogger('EditFeatureDialog');
 
 interface EditFeatureDialogProps {
   feature: Feature | null;
@@ -65,23 +54,25 @@ interface EditFeatureDialogProps {
       category: string;
       description: string;
       skipTests: boolean;
-      model: AgentModel;
+      model: ModelAlias;
       thinkingLevel: ThinkingLevel;
+      reasoningEffort: ReasoningEffort;
       imagePaths: DescriptionImagePath[];
       textFilePaths: DescriptionTextFilePath[];
       branchName: string; // Can be empty string to use current branch
       priority: number;
       planningMode: PlanningMode;
       requirePlanApproval: boolean;
-    }
+    },
+    descriptionHistorySource?: 'enhance' | 'edit',
+    enhancementMode?: EnhancementMode,
+    preEnhancementDescription?: string
   ) => void;
   categorySuggestions: string[];
   branchSuggestions: string[];
   branchCardCounts?: Record<string, number>; // Map of branch name to unarchived card count
   currentBranch?: string;
   isMaximized: boolean;
-  showProfilesOnly: boolean;
-  aiProfiles: AIProfile[];
   allFeatures: Feature[];
 }
 
@@ -94,71 +85,100 @@ export function EditFeatureDialog({
   branchCardCounts,
   currentBranch,
   isMaximized,
-  showProfilesOnly,
-  aiProfiles,
   allFeatures,
 }: EditFeatureDialogProps) {
+  const navigate = useNavigate();
   const [editingFeature, setEditingFeature] = useState<Feature | null>(feature);
-  const [useCurrentBranch, setUseCurrentBranch] = useState(() => {
-    // If feature has no branchName, default to using current branch
-    return !feature?.branchName;
+  // Derive initial workMode from feature's branchName
+  const [workMode, setWorkMode] = useState<WorkMode>(() => {
+    // If feature has a branchName, it's using 'custom' mode
+    // Otherwise, it's on 'current' branch (no worktree isolation)
+    return feature?.branchName ? 'custom' : 'current';
   });
   const [editFeaturePreviewMap, setEditFeaturePreviewMap] = useState<ImagePreviewMap>(
     () => new Map()
   );
-  const [showEditAdvancedOptions, setShowEditAdvancedOptions] = useState(false);
-  const [isEnhancing, setIsEnhancing] = useState(false);
-  const [enhancementMode, setEnhancementMode] = useState<
-    'improve' | 'technical' | 'simplify' | 'acceptance'
-  >('improve');
   const [showDependencyTree, setShowDependencyTree] = useState(false);
   const [planningMode, setPlanningMode] = useState<PlanningMode>(feature?.planningMode ?? 'skip');
   const [requirePlanApproval, setRequirePlanApproval] = useState(
     feature?.requirePlanApproval ?? false
   );
 
-  // Get enhancement model and worktrees setting from store
-  const { enhancementModel, useWorktrees } = useAppStore();
+  // Model selection state
+  const [modelEntry, setModelEntry] = useState<PhaseModelEntry>(() => ({
+    model: (feature?.model as ModelAlias) || 'opus',
+    thinkingLevel: feature?.thinkingLevel || 'none',
+    reasoningEffort: feature?.reasoningEffort || 'none',
+  }));
+
+  // Check if current model supports planning mode (Claude/Anthropic only)
+  const modelSupportsPlanningMode = isClaudeModel(modelEntry.model);
+
+  // Track the source of description changes for history
+  const [descriptionChangeSource, setDescriptionChangeSource] = useState<
+    { source: 'enhance'; mode: EnhancementMode } | 'edit' | null
+  >(null);
+  // Track the original description when the dialog opened for comparison
+  const [originalDescription, setOriginalDescription] = useState(feature?.description ?? '');
+  // Track the description before enhancement (so it can be restored)
+  const [preEnhancementDescription, setPreEnhancementDescription] = useState<string | null>(null);
+  // Local history state for real-time display (combines persisted + session history)
+  const [localHistory, setLocalHistory] = useState<DescriptionHistoryEntry[]>(
+    feature?.descriptionHistory ?? []
+  );
 
   useEffect(() => {
     setEditingFeature(feature);
     if (feature) {
       setPlanningMode(feature.planningMode ?? 'skip');
       setRequirePlanApproval(feature.requirePlanApproval ?? false);
-      // If feature has no branchName, default to using current branch
-      setUseCurrentBranch(!feature.branchName);
+      // Derive workMode from feature's branchName
+      setWorkMode(feature.branchName ? 'custom' : 'current');
+      // Reset history tracking state
+      setOriginalDescription(feature.description ?? '');
+      setDescriptionChangeSource(null);
+      setPreEnhancementDescription(null);
+      setLocalHistory(feature.descriptionHistory ?? []);
+      // Reset model entry
+      setModelEntry({
+        model: (feature.model as ModelAlias) || 'opus',
+        thinkingLevel: feature.thinkingLevel || 'none',
+        reasoningEffort: feature.reasoningEffort || 'none',
+      });
     } else {
       setEditFeaturePreviewMap(new Map());
-      setShowEditAdvancedOptions(false);
+      setDescriptionChangeSource(null);
+      setPreEnhancementDescription(null);
+      setLocalHistory([]);
     }
   }, [feature]);
+
+  const handleModelChange = (entry: PhaseModelEntry) => {
+    setModelEntry(entry);
+  };
 
   const handleUpdate = () => {
     if (!editingFeature) return;
 
-    // Validate branch selection when "other branch" is selected and branch selector is enabled
+    // Validate branch selection for custom mode
     const isBranchSelectorEnabled = editingFeature.status === 'backlog';
-    if (
-      useWorktrees &&
-      isBranchSelectorEnabled &&
-      !useCurrentBranch &&
-      !editingFeature.branchName?.trim()
-    ) {
+    if (isBranchSelectorEnabled && workMode === 'custom' && !editingFeature.branchName?.trim()) {
       toast.error('Please select a branch name');
       return;
     }
 
-    const selectedModel = (editingFeature.model ?? 'opus') as AgentModel;
+    const selectedModel = modelEntry.model;
     const normalizedThinking: ThinkingLevel = modelSupportsThinking(selectedModel)
-      ? (editingFeature.thinkingLevel ?? 'none')
+      ? (modelEntry.thinkingLevel ?? 'none')
+      : 'none';
+    const normalizedReasoning: ReasoningEffort = supportsReasoningEffort(selectedModel)
+      ? (modelEntry.reasoningEffort ?? 'none')
       : 'none';
 
-    // Use current branch if toggle is on
-    // If currentBranch is provided (non-primary worktree), use it
-    // Otherwise (primary worktree), use empty string which means "unassigned" (show only on primary)
-    const finalBranchName = useCurrentBranch
-      ? currentBranch || ''
-      : editingFeature.branchName || '';
+    // For 'current' mode, use empty string (work on current branch)
+    // For 'auto' mode, use empty string (will be auto-generated in use-board-actions)
+    // For 'custom' mode, use the specified branch name
+    const finalBranchName = workMode === 'custom' ? editingFeature.branchName || '' : '';
 
     const updates = {
       title: editingFeature.title ?? '',
@@ -167,17 +187,38 @@ export function EditFeatureDialog({
       skipTests: editingFeature.skipTests ?? false,
       model: selectedModel,
       thinkingLevel: normalizedThinking,
+      reasoningEffort: normalizedReasoning,
       imagePaths: editingFeature.imagePaths ?? [],
       textFilePaths: editingFeature.textFilePaths ?? [],
       branchName: finalBranchName,
       priority: editingFeature.priority ?? 2,
       planningMode,
       requirePlanApproval,
+      workMode,
     };
 
-    onUpdate(editingFeature.id, updates);
+    // Determine if description changed and what source to use
+    const descriptionChanged = editingFeature.description !== originalDescription;
+    let historySource: 'enhance' | 'edit' | undefined;
+    let historyEnhancementMode: 'improve' | 'technical' | 'simplify' | 'acceptance' | undefined;
+
+    if (descriptionChanged && descriptionChangeSource) {
+      if (descriptionChangeSource === 'edit') {
+        historySource = 'edit';
+      } else {
+        historySource = 'enhance';
+        historyEnhancementMode = descriptionChangeSource.mode;
+      }
+    }
+
+    onUpdate(
+      editingFeature.id,
+      updates,
+      historySource,
+      historyEnhancementMode,
+      preEnhancementDescription ?? undefined
+    );
     setEditFeaturePreviewMap(new Map());
-    setShowEditAdvancedOptions(false);
     onClose();
   };
 
@@ -187,56 +228,13 @@ export function EditFeatureDialog({
     }
   };
 
-  const handleModelSelect = (model: AgentModel) => {
-    if (!editingFeature) return;
-    setEditingFeature({
-      ...editingFeature,
-      model,
-      thinkingLevel: modelSupportsThinking(model) ? editingFeature.thinkingLevel : 'none',
-    });
-  };
-
-  const handleProfileSelect = (model: AgentModel, thinkingLevel: ThinkingLevel) => {
-    if (!editingFeature) return;
-    setEditingFeature({
-      ...editingFeature,
-      model,
-      thinkingLevel,
-    });
-  };
-
-  const handleEnhanceDescription = async () => {
-    if (!editingFeature?.description.trim() || isEnhancing) return;
-
-    setIsEnhancing(true);
-    try {
-      const api = getElectronAPI();
-      const result = await api.enhancePrompt?.enhance(
-        editingFeature.description,
-        enhancementMode,
-        enhancementModel
-      );
-
-      if (result?.success && result.enhancedText) {
-        const enhancedText = result.enhancedText;
-        setEditingFeature((prev) => (prev ? { ...prev, description: enhancedText } : prev));
-        toast.success('Description enhanced!');
-      } else {
-        toast.error(result?.error || 'Failed to enhance description');
-      }
-    } catch (error) {
-      console.error('Enhancement failed:', error);
-      toast.error('Failed to enhance description');
-    } finally {
-      setIsEnhancing(false);
-    }
-  };
-
-  const editModelAllowsThinking = modelSupportsThinking(editingFeature?.model);
-
   if (!editingFeature) {
     return null;
   }
+
+  // Shared card styling
+  const cardClass = 'rounded-lg border border-border/50 bg-muted/30 p-4 space-y-3';
+  const sectionHeaderClass = 'flex items-center gap-2 text-sm font-medium text-foreground';
 
   return (
     <Dialog open={!!editingFeature} onOpenChange={handleDialogClose}>
@@ -260,34 +258,38 @@ export function EditFeatureDialog({
           <DialogTitle>Edit Feature</DialogTitle>
           <DialogDescription>Modify the feature details.</DialogDescription>
         </DialogHeader>
-        <Tabs defaultValue="prompt" className="py-4 flex-1 min-h-0 flex flex-col">
-          <TabsList className="w-full grid grid-cols-3 mb-4">
-            <TabsTrigger value="prompt" data-testid="edit-tab-prompt">
-              <MessageSquare className="w-4 h-4 mr-2" />
-              Prompt
-            </TabsTrigger>
-            <TabsTrigger value="model" data-testid="edit-tab-model">
-              <Settings2 className="w-4 h-4 mr-2" />
-              Model
-            </TabsTrigger>
-            <TabsTrigger value="options" data-testid="edit-tab-options">
-              <SlidersHorizontal className="w-4 h-4 mr-2" />
-              Options
-            </TabsTrigger>
-          </TabsList>
 
-          {/* Prompt Tab */}
-          <TabsContent value="prompt" className="space-y-4 overflow-y-auto cursor-default">
+        <div className="py-4 space-y-4 overflow-y-auto flex-1 min-h-0">
+          {/* Task Details Section */}
+          <div className={cardClass}>
             <div className="space-y-2">
-              <Label htmlFor="edit-description">Description</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="edit-description">Description</Label>
+                {/* Version History Button - uses local history for real-time updates */}
+                <EnhancementHistoryButton
+                  history={localHistory}
+                  currentValue={editingFeature.description}
+                  onRestore={(description) => {
+                    setEditingFeature((prev) => (prev ? { ...prev, description } : prev));
+                    setDescriptionChangeSource('edit');
+                  }}
+                  valueAccessor={(entry) => entry.description}
+                  title="Version History"
+                  restoreMessage="Description restored from history"
+                />
+              </div>
               <DescriptionImageDropZone
                 value={editingFeature.description}
-                onChange={(value) =>
+                onChange={(value) => {
                   setEditingFeature({
                     ...editingFeature,
                     description: value,
-                  })
-                }
+                  });
+                  // Track that this change was a manual edit (unless already enhanced)
+                  if (!descriptionChangeSource || descriptionChangeSource === 'edit') {
+                    setDescriptionChangeSource('edit');
+                  }
+                }}
                 images={editingFeature.imagePaths ?? []}
                 onImagesChange={(images) =>
                   setEditingFeature({
@@ -308,6 +310,7 @@ export function EditFeatureDialog({
                 data-testid="edit-feature-description"
               />
             </div>
+
             <div className="space-y-2">
               <Label htmlFor="edit-title">Title (optional)</Label>
               <Input
@@ -323,64 +326,213 @@ export function EditFeatureDialog({
                 data-testid="edit-feature-title"
               />
             </div>
-            <div className="flex w-fit items-center gap-3 select-none cursor-default">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="w-[180px] justify-between">
-                    {enhancementMode === 'improve' && 'Improve Clarity'}
-                    {enhancementMode === 'technical' && 'Add Technical Details'}
-                    {enhancementMode === 'simplify' && 'Simplify'}
-                    {enhancementMode === 'acceptance' && 'Add Acceptance Criteria'}
-                    <ChevronDown className="w-4 h-4 ml-2" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onClick={() => setEnhancementMode('improve')}>
-                    Improve Clarity
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setEnhancementMode('technical')}>
-                    Add Technical Details
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setEnhancementMode('simplify')}>
-                    Simplify
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => setEnhancementMode('acceptance')}>
-                    Add Acceptance Criteria
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
 
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleEnhanceDescription}
-                disabled={!editingFeature.description.trim() || isEnhancing}
-                loading={isEnhancing}
-              >
-                <Sparkles className="w-4 h-4 mr-2" />
-                Enhance with AI
-              </Button>
+            {/* Enhancement Section */}
+            <EnhanceWithAI
+              value={editingFeature.description}
+              onChange={(enhanced) =>
+                setEditingFeature((prev) => (prev ? { ...prev, description: enhanced } : prev))
+              }
+              onHistoryAdd={({ mode, originalText, enhancedText }) => {
+                setDescriptionChangeSource({ source: 'enhance', mode });
+                setPreEnhancementDescription(originalText);
+
+                // Update local history for real-time display
+                const timestamp = new Date().toISOString();
+                setLocalHistory((prev) => {
+                  const newHistory = [...prev];
+                  // Add original text first (so user can restore to pre-enhancement state)
+                  const lastEntry = prev[prev.length - 1];
+                  if (!lastEntry || lastEntry.description !== originalText) {
+                    newHistory.push({
+                      description: originalText,
+                      timestamp,
+                      source: prev.length === 0 ? 'initial' : 'edit',
+                    });
+                  }
+                  // Add enhanced text
+                  newHistory.push({
+                    description: enhancedText,
+                    timestamp,
+                    source: 'enhance',
+                    enhancementMode: mode,
+                  });
+                  return newHistory;
+                });
+              }}
+            />
+          </div>
+
+          {/* AI & Execution Section */}
+          <div className={cardClass}>
+            <div className="flex items-center justify-between">
+              <div className={sectionHeaderClass}>
+                <Cpu className="w-4 h-4 text-muted-foreground" />
+                <span>AI & Execution</span>
+              </div>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        navigate({ to: '/settings', search: { view: 'defaults' } });
+                      }}
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Settings2 className="w-3.5 h-3.5" />
+                      <span>Edit Defaults</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Change default model and planning settings for new features</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-category">Category (optional)</Label>
-              <CategoryAutocomplete
-                value={editingFeature.category}
-                onChange={(value) =>
-                  setEditingFeature({
-                    ...editingFeature,
-                    category: value,
-                  })
-                }
-                suggestions={categorySuggestions}
-                placeholder="e.g., Core, UI, API"
-                data-testid="edit-feature-category"
+
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Model</Label>
+              <PhaseModelSelector
+                value={modelEntry}
+                onChange={handleModelChange}
+                compact
+                align="end"
               />
             </div>
-            {useWorktrees && (
-              <BranchSelector
-                useCurrentBranch={useCurrentBranch}
-                onUseCurrentBranchChange={setUseCurrentBranch}
+
+            <div className="grid gap-3 grid-cols-2">
+              <div className="space-y-1.5">
+                <Label
+                  className={cn(
+                    'text-xs text-muted-foreground',
+                    !modelSupportsPlanningMode && 'opacity-50'
+                  )}
+                >
+                  Planning
+                </Label>
+                {modelSupportsPlanningMode ? (
+                  <PlanningModeSelect
+                    mode={planningMode}
+                    onModeChange={setPlanningMode}
+                    testIdPrefix="edit-feature-planning"
+                    compact
+                  />
+                ) : (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div>
+                          <PlanningModeSelect
+                            mode="skip"
+                            onModeChange={() => {}}
+                            testIdPrefix="edit-feature-planning"
+                            compact
+                            disabled
+                          />
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Planning modes are only available for Claude Provider</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Options</Label>
+                <div className="flex flex-col gap-2 pt-1">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="edit-feature-skip-tests"
+                      checked={!(editingFeature.skipTests ?? false)}
+                      onCheckedChange={(checked) =>
+                        setEditingFeature({ ...editingFeature, skipTests: !checked })
+                      }
+                      data-testid="edit-feature-skip-tests-checkbox"
+                    />
+                    <Label
+                      htmlFor="edit-feature-skip-tests"
+                      className="text-xs font-normal cursor-pointer"
+                    >
+                      Run tests
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="edit-feature-require-approval"
+                      checked={requirePlanApproval}
+                      onCheckedChange={(checked) => setRequirePlanApproval(!!checked)}
+                      disabled={
+                        !modelSupportsPlanningMode ||
+                        planningMode === 'skip' ||
+                        planningMode === 'lite'
+                      }
+                      data-testid="edit-feature-require-approval-checkbox"
+                    />
+                    <Label
+                      htmlFor="edit-feature-require-approval"
+                      className={cn(
+                        'text-xs font-normal',
+                        !modelSupportsPlanningMode ||
+                          planningMode === 'skip' ||
+                          planningMode === 'lite'
+                          ? 'cursor-not-allowed text-muted-foreground'
+                          : 'cursor-pointer'
+                      )}
+                    >
+                      Require approval
+                    </Label>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Organization Section */}
+          <div className={cardClass}>
+            <div className={sectionHeaderClass}>
+              <FolderKanban className="w-4 h-4 text-muted-foreground" />
+              <span>Organization</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Category</Label>
+                <CategoryAutocomplete
+                  value={editingFeature.category}
+                  onChange={(value) =>
+                    setEditingFeature({
+                      ...editingFeature,
+                      category: value,
+                    })
+                  }
+                  suggestions={categorySuggestions}
+                  placeholder="e.g., Core, UI, API"
+                  data-testid="edit-feature-category"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-muted-foreground">Priority</Label>
+                <PrioritySelector
+                  selectedPriority={editingFeature.priority ?? 2}
+                  onPrioritySelect={(priority) =>
+                    setEditingFeature({
+                      ...editingFeature,
+                      priority,
+                    })
+                  }
+                  testIdPrefix="edit-priority"
+                />
+              </div>
+            </div>
+
+            {/* Work Mode Selector */}
+            <div className="pt-2">
+              <WorkModeSelector
+                workMode={workMode}
+                onWorkModeChange={setWorkMode}
                 branchName={editingFeature.branchName ?? ''}
                 onBranchNameChange={(value) =>
                   setEditingFeature({
@@ -392,107 +544,12 @@ export function EditFeatureDialog({
                 branchCardCounts={branchCardCounts}
                 currentBranch={currentBranch}
                 disabled={editingFeature.status !== 'backlog'}
-                testIdPrefix="edit-feature"
+                testIdPrefix="edit-feature-work-mode"
               />
-            )}
+            </div>
+          </div>
+        </div>
 
-            {/* Priority Selector */}
-            <PrioritySelector
-              selectedPriority={editingFeature.priority ?? 2}
-              onPrioritySelect={(priority) =>
-                setEditingFeature({
-                  ...editingFeature,
-                  priority,
-                })
-              }
-              testIdPrefix="edit-priority"
-            />
-          </TabsContent>
-
-          {/* Model Tab */}
-          <TabsContent value="model" className="space-y-4 overflow-y-auto cursor-default">
-            {/* Show Advanced Options Toggle */}
-            {showProfilesOnly && (
-              <div className="flex items-center justify-between p-3 bg-muted/30 rounded-lg border border-border">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-foreground">Simple Mode Active</p>
-                  <p className="text-xs text-muted-foreground">
-                    Only showing AI profiles. Advanced model tweaking is hidden.
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowEditAdvancedOptions(!showEditAdvancedOptions)}
-                  data-testid="edit-show-advanced-options-toggle"
-                >
-                  <Settings2 className="w-4 h-4 mr-2" />
-                  {showEditAdvancedOptions ? 'Hide' : 'Show'} Advanced
-                </Button>
-              </div>
-            )}
-
-            {/* Quick Select Profile Section */}
-            <ProfileQuickSelect
-              profiles={aiProfiles}
-              selectedModel={editingFeature.model ?? 'opus'}
-              selectedThinkingLevel={editingFeature.thinkingLevel ?? 'none'}
-              onSelect={handleProfileSelect}
-              testIdPrefix="edit-profile-quick-select"
-            />
-
-            {/* Separator */}
-            {aiProfiles.length > 0 && (!showProfilesOnly || showEditAdvancedOptions) && (
-              <div className="border-t border-border" />
-            )}
-
-            {/* Claude Models Section */}
-            {(!showProfilesOnly || showEditAdvancedOptions) && (
-              <>
-                <ModelSelector
-                  selectedModel={(editingFeature.model ?? 'opus') as AgentModel}
-                  onModelSelect={handleModelSelect}
-                  testIdPrefix="edit-model-select"
-                />
-                {editModelAllowsThinking && (
-                  <ThinkingLevelSelector
-                    selectedLevel={editingFeature.thinkingLevel ?? 'none'}
-                    onLevelSelect={(level) =>
-                      setEditingFeature({
-                        ...editingFeature,
-                        thinkingLevel: level,
-                      })
-                    }
-                    testIdPrefix="edit-thinking-level"
-                  />
-                )}
-              </>
-            )}
-          </TabsContent>
-
-          {/* Options Tab */}
-          <TabsContent value="options" className="space-y-4 overflow-y-auto cursor-default">
-            {/* Planning Mode Section */}
-            <PlanningModeSelector
-              mode={planningMode}
-              onModeChange={setPlanningMode}
-              requireApproval={requirePlanApproval}
-              onRequireApprovalChange={setRequirePlanApproval}
-              featureDescription={editingFeature.description}
-              testIdPrefix="edit-feature"
-              compact
-            />
-
-            <div className="border-t border-border my-4" />
-
-            {/* Testing Section */}
-            <TestingTabContent
-              skipTests={editingFeature.skipTests ?? false}
-              onSkipTestsChange={(skipTests) => setEditingFeature({ ...editingFeature, skipTests })}
-              testIdPrefix="edit"
-            />
-          </TabsContent>
-        </Tabs>
         <DialogFooter className="sm:!justify-between">
           <Button
             variant="outline"
@@ -512,9 +569,8 @@ export function EditFeatureDialog({
               hotkeyActive={!!editingFeature}
               data-testid="confirm-edit-feature"
               disabled={
-                useWorktrees &&
                 editingFeature.status === 'backlog' &&
-                !useCurrentBranch &&
+                workMode === 'custom' &&
                 !editingFeature.branchName?.trim()
               }
             >

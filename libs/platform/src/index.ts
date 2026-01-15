@@ -18,11 +18,23 @@ export {
   getValidationPath,
   getAppSpecPath,
   getBranchTrackingPath,
+  getExecutionStatePath,
   ensureAutomakerDir,
   getGlobalSettingsPath,
   getCredentialsPath,
   getProjectSettingsPath,
   ensureDataDir,
+  // Ideation paths
+  getIdeationDir,
+  getIdeasDir,
+  getIdeaDir,
+  getIdeaPath,
+  getIdeaAttachmentsDir,
+  getIdeationSessionsDir,
+  getIdeationSessionPath,
+  getIdeationDraftsDir,
+  getIdeationAnalysisPath,
+  ensureIdeationDir,
 } from './paths.js';
 
 // Subprocess management
@@ -55,3 +67,106 @@ export {
   type NodeFinderResult,
   type NodeFinderOptions,
 } from './node-finder.js';
+
+// WSL (Windows Subsystem for Linux) utilities
+export {
+  isWslAvailable,
+  clearWslCache,
+  getDefaultWslDistribution,
+  getWslDistributions,
+  findCliInWsl,
+  execInWsl,
+  createWslCommand,
+  windowsToWslPath,
+  wslToWindowsPath,
+  type WslCliResult,
+  type WslOptions,
+} from './wsl.js';
+
+// System paths for tool detection (GitHub CLI, Claude CLI, Node.js, etc.)
+export * as systemPaths from './system-paths.js';
+export {
+  // CLI tool paths
+  getGitHubCliPaths,
+  getClaudeCliPaths,
+  getClaudeConfigDir,
+  getClaudeCredentialPaths,
+  getClaudeSettingsPath,
+  getClaudeStatsCachePath,
+  getClaudeProjectsDir,
+  getCodexCliPaths,
+  getCodexConfigDir,
+  getCodexAuthPath,
+  getGitBashPaths,
+  getOpenCodeCliPaths,
+  getOpenCodeConfigDir,
+  getOpenCodeAuthPath,
+  getShellPaths,
+  getExtendedPath,
+  // Node.js paths
+  getNvmPaths,
+  getFnmPaths,
+  getNodeSystemPaths,
+  getScoopNodePath,
+  getChocolateyNodePath,
+  getWslVersionPath,
+  // System path operations
+  systemPathExists,
+  systemPathAccess,
+  systemPathIsExecutable,
+  systemPathReadFile,
+  systemPathReadFileSync,
+  systemPathWriteFileSync,
+  systemPathReaddir,
+  systemPathReaddirSync,
+  systemPathStatSync,
+  systemPathStat,
+  isAllowedSystemPath,
+  // High-level methods
+  findFirstExistingPath,
+  findGitHubCliPath,
+  findClaudeCliPath,
+  getClaudeAuthIndicators,
+  type ClaudeAuthIndicators,
+  findCodexCliPath,
+  getCodexAuthIndicators,
+  type CodexAuthIndicators,
+  findGitBashPath,
+  findOpenCodeCliPath,
+  getOpenCodeAuthIndicators,
+  type OpenCodeAuthIndicators,
+  // Electron userData operations
+  setElectronUserDataPath,
+  getElectronUserDataPath,
+  isElectronUserDataPath,
+  electronUserDataReadFileSync,
+  electronUserDataWriteFileSync,
+  electronUserDataExists,
+  // Script directory operations
+  setScriptBaseDir,
+  getScriptBaseDir,
+  scriptDirExists,
+  scriptDirMkdirSync,
+  scriptDirCreateWriteStream,
+  // Electron app bundle operations
+  setElectronAppPaths,
+  electronAppExists,
+  electronAppReadFileSync,
+  electronAppStatSync,
+  electronAppStat,
+  electronAppReadFile,
+} from './system-paths.js';
+
+// Port configuration
+export { STATIC_PORT, SERVER_PORT, RESERVED_PORTS } from './config/ports.js';
+
+// Editor detection and launching (cross-platform)
+export {
+  commandExists,
+  clearEditorCache,
+  detectAllEditors,
+  detectDefaultEditor,
+  findEditorByCommand,
+  openInEditor,
+  openInFileManager,
+} from './editor.js';

@@ -6,12 +6,16 @@
 import path from 'path';
 import * as secureFs from '../lib/secure-fs.js';
 import type { EventEmitter } from '../lib/events.js';
-import type { ExecuteOptions } from '@automaker/types';
+import type { ExecuteOptions, ThinkingLevel, ReasoningEffort } from '@automaker/types';
+import { stripProviderPrefix } from '@automaker/types';
 import {
   readImageAsBase64,
   buildPromptWithImages,
   isAbortError,
   loadContextFiles,
+  createLogger,
+  classifyError,
+  getUserFriendlyErrorMessage,
 } from '@automaker/utils';
 import { ProviderFactory } from '../providers/provider-factory.js';
 import { createChatOptions, validateWorkingDirectory } from '../lib/sdk-options.js';
@@ -19,8 +23,12 @@ import { PathNotAllowedError } from '@automaker/platform';
 import type { SettingsService } from './settings-service.js';
 import {
   getAutoLoadClaudeMdSetting,
-  getEnableSandboxModeSetting,
   filterClaudeMdFromContext,
+  getMCPServersFromSettings,
+  getPromptCustomization,
+  getSkillsConfiguration,
+  getSubagentsConfiguration,
+  getCustomSubagents,
 } from '../lib/settings-helpers.js';
 
 interface Message {
@@ -41,6 +49,7 @@ interface QueuedPrompt {
   message: string;
   imagePaths?: string[];
   model?: string;
+  thinkingLevel?: ThinkingLevel;
   addedAt: string;
 }
 
@@ -50,6 +59,8 @@ interface Session {
   abortController: AbortController | null;
   workingDirectory: string;
   model?: string;
+  thinkingLevel?: ThinkingLevel; // Thinking level for Claude models
+  reasoningEffort?: ReasoningEffort; // Reasoning effort for Codex models
   sdkSessionId?: string; // Claude SDK session ID for conversation continuity
   promptQueue: QueuedPrompt[]; // Queue of prompts to auto-run after current task
 }
@@ -73,6 +84,7 @@ export class AgentService {
   private metadataFile: string;
   private events: EventEmitter;
   private settingsService: SettingsService | null = null;
+  private logger = createLogger('AgentService');
 
   constructor(dataDir: string, events: EventEmitter, settingsService?: SettingsService) {
     this.stateDir = path.join(dataDir, 'agent-sessions');
@@ -137,28 +149,50 @@ export class AgentService {
     workingDirectory,
     imagePaths,
     model,
+    thinkingLevel,
+    reasoningEffort,
   }: {
     sessionId: string;
     message: string;
     workingDirectory?: string;
     imagePaths?: string[];
     model?: string;
+    thinkingLevel?: ThinkingLevel;
+    reasoningEffort?: ReasoningEffort;
   }) {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.error('[AgentService] ERROR: Session not found:', sessionId);
+      this.logger.error('ERROR: Session not found:', sessionId);
       throw new Error(`Session ${sessionId} not found`);
     }
 
     if (session.isRunning) {
-      console.error('[AgentService] ERROR: Agent already running for session:', sessionId);
+      this.logger.error('ERROR: Agent already running for session:', sessionId);
       throw new Error('Agent is already processing a message');
     }
 
-    // Update session model if provided
+    // Update session model, thinking level, and reasoning effort if provided
     if (model) {
       session.model = model;
       await this.updateSession(sessionId, { model });
+    }
+    if (thinkingLevel !== undefined) {
+      session.thinkingLevel = thinkingLevel;
+    }
+    if (reasoningEffort !== undefined) {
+      session.reasoningEffort = reasoningEffort;
+    }
+
+    // Validate vision support before processing images
+    const effectiveModel = model || session.model;
+    if (imagePaths && imagePaths.length > 0 && effectiveModel) {
+      const supportsVision = ProviderFactory.modelSupportsVision(effectiveModel);
+      if (!supportsVision) {
+        throw new Error(
+          `This model (${effectiveModel}) does not support image input. ` +
+            `Please switch to a model that supports vision, or remove the images and try again.`
+        );
+      }
     }
 
     // Read images and convert to base64
@@ -173,7 +207,7 @@ export class AgentService {
             filename: imageData.filename,
           });
         } catch (error) {
-          console.error(`[AgentService] Failed to load image ${imagePath}:`, error);
+          this.logger.error(`Failed to load image ${imagePath}:`, error);
         }
       }
     }
@@ -221,16 +255,34 @@ export class AgentService {
         '[AgentService]'
       );
 
-      // Load enableSandboxMode setting (global setting only)
-      const enableSandboxMode = await getEnableSandboxModeSetting(
-        this.settingsService,
-        '[AgentService]'
-      );
+      // Load MCP servers from settings (global setting only)
+      const mcpServers = await getMCPServersFromSettings(this.settingsService, '[AgentService]');
 
-      // Load project context files (CLAUDE.md, CODE_QUALITY.md, etc.)
+      // Get Skills configuration from settings
+      const skillsConfig = this.settingsService
+        ? await getSkillsConfiguration(this.settingsService)
+        : { enabled: false, sources: [] as Array<'user' | 'project'>, shouldIncludeInTools: false };
+
+      // Get Subagents configuration from settings
+      const subagentsConfig = this.settingsService
+        ? await getSubagentsConfiguration(this.settingsService)
+        : { enabled: false, sources: [] as Array<'user' | 'project'>, shouldIncludeInTools: false };
+
+      // Get custom subagents from settings (merge global + project-level) only if enabled
+      const customSubagents =
+        this.settingsService && subagentsConfig.enabled
+          ? await getCustomSubagents(this.settingsService, effectiveWorkDir)
+          : undefined;
+
+      // Load project context files (CLAUDE.md, CODE_QUALITY.md, etc.) and memory files
+      // Use the user's message as task context for smart memory selection
       const contextResult = await loadContextFiles({
         projectPath: effectiveWorkDir,
         fsModule: secureFs as Parameters<typeof loadContextFiles>[0]['fsModule'],
+        taskContext: {
+          title: message.substring(0, 200), // Use first 200 chars as title
+          description: message,
+        },
       });
 
       // When autoLoadClaudeMd is enabled, filter out CLAUDE.md to avoid duplication
@@ -238,12 +290,15 @@ export class AgentService {
       const contextFilesPrompt = filterClaudeMdFromContext(contextResult, autoLoadClaudeMd);
 
       // Build combined system prompt with base prompt and context files
-      const baseSystemPrompt = this.getSystemPrompt();
+      const baseSystemPrompt = await this.getSystemPrompt();
       const combinedSystemPrompt = contextFilesPrompt
         ? `${contextFilesPrompt}\n\n${baseSystemPrompt}`
         : baseSystemPrompt;
 
       // Build SDK options using centralized configuration
+      // Use thinking level and reasoning effort from request, or fall back to session's stored values
+      const effectiveThinkingLevel = thinkingLevel ?? session.thinkingLevel;
+      const effectiveReasoningEffort = reasoningEffort ?? session.reasoningEffort;
       const sdkOptions = createChatOptions({
         cwd: effectiveWorkDir,
         model: model,
@@ -251,30 +306,78 @@ export class AgentService {
         systemPrompt: combinedSystemPrompt,
         abortController: session.abortController!,
         autoLoadClaudeMd,
-        enableSandboxMode,
+        thinkingLevel: effectiveThinkingLevel, // Pass thinking level for Claude models
+        mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
       });
 
       // Extract model, maxTurns, and allowedTools from SDK options
       const effectiveModel = sdkOptions.model!;
       const maxTurns = sdkOptions.maxTurns;
-      const allowedTools = sdkOptions.allowedTools as string[] | undefined;
+      let allowedTools = sdkOptions.allowedTools as string[] | undefined;
 
-      // Get provider for this model
+      // Build merged settingSources array using Set for automatic deduplication
+      const sdkSettingSources = (sdkOptions.settingSources ?? []).filter(
+        (source): source is 'user' | 'project' => source === 'user' || source === 'project'
+      );
+      const skillSettingSources = skillsConfig.enabled ? skillsConfig.sources : [];
+      const settingSources = [...new Set([...sdkSettingSources, ...skillSettingSources])];
+
+      // Enhance allowedTools with Skills and Subagents tools
+      // These tools are not in the provider's default set - they're added dynamically based on settings
+      const needsSkillTool = skillsConfig.shouldIncludeInTools;
+      const needsTaskTool =
+        subagentsConfig.shouldIncludeInTools &&
+        customSubagents &&
+        Object.keys(customSubagents).length > 0;
+
+      // Base tools that match the provider's default set
+      const baseTools = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'];
+
+      if (allowedTools) {
+        allowedTools = [...allowedTools]; // Create a copy to avoid mutating SDK options
+        // Add Skill tool if skills are enabled
+        if (needsSkillTool && !allowedTools.includes('Skill')) {
+          allowedTools.push('Skill');
+        }
+        // Add Task tool if custom subagents are configured
+        if (needsTaskTool && !allowedTools.includes('Task')) {
+          allowedTools.push('Task');
+        }
+      } else if (needsSkillTool || needsTaskTool) {
+        // If no allowedTools specified but we need to add Skill/Task tools,
+        // build the full list including base tools
+        allowedTools = [...baseTools];
+        if (needsSkillTool) {
+          allowedTools.push('Skill');
+        }
+        if (needsTaskTool) {
+          allowedTools.push('Task');
+        }
+      }
+
+      // Get provider for this model (with prefix)
       const provider = ProviderFactory.getProviderForModel(effectiveModel);
+
+      // Strip provider prefix - providers should receive bare model IDs
+      const bareModel = stripProviderPrefix(effectiveModel);
 
       // Build options for provider
       const options: ExecuteOptions = {
         prompt: '', // Will be set below based on images
-        model: effectiveModel,
+        model: bareModel, // Bare model ID (e.g., "gpt-5.1-codex-max", "composer-1")
+        originalModel: effectiveModel, // Original with prefix for logging (e.g., "codex-gpt-5.1-codex-max")
         cwd: effectiveWorkDir,
         systemPrompt: sdkOptions.systemPrompt,
         maxTurns: maxTurns,
         allowedTools: allowedTools,
         abortController: session.abortController!,
         conversationHistory: conversationHistory.length > 0 ? conversationHistory : undefined,
-        settingSources: sdkOptions.settingSources,
-        sandbox: sdkOptions.sandbox, // Pass sandbox configuration
+        settingSources: settingSources.length > 0 ? settingSources : undefined,
         sdkSessionId: session.sdkSessionId, // Pass SDK session ID for resuming
+        mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined, // Pass MCP servers configuration
+        agents: customSubagents, // Pass custom subagents for task delegation
+        thinkingLevel: effectiveThinkingLevel, // Pass thinking level for Claude models
+        reasoningEffort: effectiveReasoningEffort, // Pass reasoning effort for Codex models
       };
 
       // Build prompt content with images
@@ -355,6 +458,53 @@ export class AgentService {
             content: responseText,
             toolUses,
           });
+        } else if (msg.type === 'error') {
+          // Some providers (like Codex CLI/SaaS or Cursor CLI) surface failures as
+          // streamed error messages instead of throwing. Handle these here so the
+          // Agent Runner UX matches the Claude/Cursor behavior without changing
+          // their provider implementations.
+          const rawErrorText =
+            (typeof msg.error === 'string' && msg.error.trim()) ||
+            'Unexpected error from provider during agent execution.';
+
+          const errorInfo = classifyError(new Error(rawErrorText));
+
+          // Keep the provider-supplied text intact (Codex already includes helpful tips),
+          // only add a small rate-limit hint when we can detect it.
+          const enhancedText = errorInfo.isRateLimit
+            ? `${rawErrorText}\n\nTip: It looks like you hit a rate limit. Try waiting a bit or reducing concurrent Agent Runner / Auto Mode tasks.`
+            : rawErrorText;
+
+          this.logger.error('Provider error during agent execution:', {
+            type: errorInfo.type,
+            message: errorInfo.message,
+          });
+
+          // Mark session as no longer running so the UI and queue stay in sync
+          session.isRunning = false;
+          session.abortController = null;
+
+          const errorMessage: Message = {
+            id: this.generateId(),
+            role: 'assistant',
+            content: `Error: ${enhancedText}`,
+            timestamp: new Date().toISOString(),
+            isError: true,
+          };
+
+          session.messages.push(errorMessage);
+          await this.saveSession(sessionId, session.messages);
+
+          this.emitAgentEvent(sessionId, {
+            type: 'error',
+            error: enhancedText,
+            message: errorMessage,
+          });
+
+          // Don't continue streaming after an error message
+          return {
+            success: false,
+          };
         }
       }
 
@@ -377,7 +527,7 @@ export class AgentService {
         return { success: false, aborted: true };
       }
 
-      console.error('[AgentService] Error:', error);
+      this.logger.error('Error:', error);
 
       session.isRunning = false;
       session.abortController = null;
@@ -471,7 +621,7 @@ export class AgentService {
       await secureFs.writeFile(sessionFile, JSON.stringify(messages, null, 2), 'utf-8');
       await this.updateSessionTimestamp(sessionId);
     } catch (error) {
-      console.error('[AgentService] Failed to save session:', error);
+      this.logger.error('Failed to save session:', error);
     }
   }
 
@@ -611,7 +761,12 @@ export class AgentService {
    */
   async addToQueue(
     sessionId: string,
-    prompt: { message: string; imagePaths?: string[]; model?: string }
+    prompt: {
+      message: string;
+      imagePaths?: string[];
+      model?: string;
+      thinkingLevel?: ThinkingLevel;
+    }
   ): Promise<{ success: boolean; queuedPrompt?: QueuedPrompt; error?: string }> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -623,6 +778,7 @@ export class AgentService {
       message: prompt.message,
       imagePaths: prompt.imagePaths,
       model: prompt.model,
+      thinkingLevel: prompt.thinkingLevel,
       addedAt: new Date().toISOString(),
     };
 
@@ -705,7 +861,7 @@ export class AgentService {
     try {
       await secureFs.writeFile(queueFile, JSON.stringify(queue, null, 2), 'utf-8');
     } catch (error) {
-      console.error('[AgentService] Failed to save queue state:', error);
+      this.logger.error('Failed to save queue state:', error);
     }
   }
 
@@ -752,9 +908,10 @@ export class AgentService {
         message: nextPrompt.message,
         imagePaths: nextPrompt.imagePaths,
         model: nextPrompt.model,
+        thinkingLevel: nextPrompt.thinkingLevel,
       });
     } catch (error) {
-      console.error('[AgentService] Failed to process queued prompt:', error);
+      this.logger.error('Failed to process queued prompt:', error);
       this.emitAgentEvent(sessionId, {
         type: 'queue_error',
         error: (error as Error).message,
@@ -767,38 +924,10 @@ export class AgentService {
     this.events.emit('agent:stream', { sessionId, ...data });
   }
 
-  private getSystemPrompt(): string {
-    return `You are an AI assistant helping users build software. You are part of the Automaker application,
-which is designed to help developers plan, design, and implement software projects autonomously.
-
-**Feature Storage:**
-Features are stored in .automaker/features/{id}/feature.json - each feature has its own folder.
-Use the UpdateFeatureStatus tool to manage features, not direct file edits.
-
-Your role is to:
-- Help users define their project requirements and specifications
-- Ask clarifying questions to better understand their needs
-- Suggest technical approaches and architectures
-- Guide them through the development process
-- Be conversational and helpful
-- Write, edit, and modify code files as requested
-- Execute commands and tests
-- Search and analyze the codebase
-
-When discussing projects, help users think through:
-- Core functionality and features
-- Technical stack choices
-- Data models and architecture
-- User experience considerations
-- Testing strategies
-
-You have full access to the codebase and can:
-- Read files to understand existing code
-- Write new files
-- Edit existing files
-- Run bash commands
-- Search for code patterns
-- Execute tests and builds`;
+  private async getSystemPrompt(): Promise<string> {
+    // Load from settings (no caching - allows hot reload of custom prompts)
+    const prompts = await getPromptCustomization(this.settingsService, '[AgentService]');
+    return prompts.agent.systemPrompt;
   }
 
   private generateId(): string {

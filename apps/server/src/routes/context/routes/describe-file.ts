@@ -1,8 +1,9 @@
 /**
  * POST /context/describe-file endpoint - Generate description for a text file
  *
- * Uses Claude Haiku to analyze a text file and generate a concise description
- * suitable for context file metadata.
+ * Uses AI to analyze a text file and generate a concise description
+ * suitable for context file metadata. Model is configurable via
+ * phaseModels.fileDescriptionModel in settings (defaults to Haiku).
  *
  * SECURITY: This endpoint validates file paths against ALLOWED_ROOT_DIRECTORY
  * and reads file content directly (not via Claude's Read tool) to prevent
@@ -10,11 +11,11 @@
  */
 
 import type { Request, Response } from 'express';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createLogger } from '@automaker/utils';
-import { CLAUDE_MODEL_MAP } from '@automaker/types';
+import { DEFAULT_PHASE_MODELS } from '@automaker/types';
 import { PathNotAllowedError } from '@automaker/platform';
-import { createCustomOptions } from '../../../lib/sdk-options.js';
+import { resolvePhaseModel } from '@automaker/model-resolver';
+import { simpleQuery } from '../../../providers/simple-query-service.js';
 import * as secureFs from '../../../lib/secure-fs.js';
 import * as path from 'path';
 import type { SettingsService } from '../../../services/settings-service.js';
@@ -47,31 +48,6 @@ interface DescribeFileErrorResponse {
 }
 
 /**
- * Extract text content from Claude SDK response messages
- */
-async function extractTextFromStream(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  stream: AsyncIterable<any>
-): Promise<string> {
-  let responseText = '';
-
-  for await (const msg of stream) {
-    if (msg.type === 'assistant' && msg.message?.content) {
-      const blocks = msg.message.content as Array<{ type: string; text?: string }>;
-      for (const block of blocks) {
-        if (block.type === 'text' && block.text) {
-          responseText += block.text;
-        }
-      }
-    } else if (msg.type === 'result' && msg.subtype === 'success') {
-      responseText = msg.result || responseText;
-    }
-  }
-
-  return responseText;
-}
-
-/**
  * Create the describe-file request handler
  *
  * @param settingsService - Optional settings service for loading autoLoadClaudeMd setting
@@ -94,7 +70,7 @@ export function createDescribeFileHandler(
         return;
       }
 
-      logger.info(`[DescribeFile] Starting description generation for: ${filePath}`);
+      logger.info(`Starting description generation for: ${filePath}`);
 
       // Resolve the path for logging and cwd derivation
       const resolvedPath = secureFs.resolvePath(filePath);
@@ -109,7 +85,7 @@ export function createDescribeFileHandler(
       } catch (readError) {
         // Path not allowed - return 403 Forbidden
         if (readError instanceof PathNotAllowedError) {
-          logger.warn(`[DescribeFile] Path not allowed: ${filePath}`);
+          logger.warn(`Path not allowed: ${filePath}`);
           const response: DescribeFileErrorResponse = {
             success: false,
             error: 'File path is not within the allowed directory',
@@ -125,7 +101,7 @@ export function createDescribeFileHandler(
           'code' in readError &&
           readError.code === 'ENOENT'
         ) {
-          logger.warn(`[DescribeFile] File not found: ${resolvedPath}`);
+          logger.warn(`File not found: ${resolvedPath}`);
           const response: DescribeFileErrorResponse = {
             success: false,
             error: `File not found: ${filePath}`,
@@ -135,7 +111,7 @@ export function createDescribeFileHandler(
         }
 
         const errorMessage = readError instanceof Error ? readError.message : 'Unknown error';
-        logger.error(`[DescribeFile] Failed to read file: ${errorMessage}`);
+        logger.error(`Failed to read file: ${errorMessage}`);
         const response: DescribeFileErrorResponse = {
           success: false,
           error: `Failed to read file: ${errorMessage}`,
@@ -156,16 +132,14 @@ export function createDescribeFileHandler(
 
       // Build prompt with file content passed as structured data
       // The file content is included directly, not via tool invocation
-      const instructionText = `Analyze the following file and provide a 1-2 sentence description suitable for use as context in an AI coding assistant. Focus on what the file contains, its purpose, and why an AI agent might want to use this context in the future (e.g., "API documentation for the authentication endpoints", "Configuration file for database connections", "Coding style guidelines for the project").
+      const prompt = `Analyze the following file and provide a 1-2 sentence description suitable for use as context in an AI coding assistant. Focus on what the file contains, its purpose, and why an AI agent might want to use this context in the future (e.g., "API documentation for the authentication endpoints", "Configuration file for database connections", "Coding style guidelines for the project").
 
 Respond with ONLY the description text, no additional formatting, preamble, or explanation.
 
-File: ${fileName}${truncated ? ' (truncated)' : ''}`;
+File: ${fileName}${truncated ? ' (truncated)' : ''}
 
-      const promptContent = [
-        { type: 'text' as const, text: instructionText },
-        { type: 'text' as const, text: `\n\n--- FILE CONTENT ---\n${contentToAnalyze}` },
-      ];
+--- FILE CONTENT ---
+${contentToAnalyze}`;
 
       // Use the file's directory as the working directory
       const cwd = path.dirname(resolvedPath);
@@ -177,30 +151,29 @@ File: ${fileName}${truncated ? ' (truncated)' : ''}`;
         '[DescribeFile]'
       );
 
-      // Use centralized SDK options with proper cwd validation
-      // No tools needed since we're passing file content directly
-      const sdkOptions = createCustomOptions({
+      // Get model from phase settings
+      const settings = await settingsService?.getGlobalSettings();
+      logger.info(`Raw phaseModels from settings:`, JSON.stringify(settings?.phaseModels, null, 2));
+      const phaseModelEntry =
+        settings?.phaseModels?.fileDescriptionModel || DEFAULT_PHASE_MODELS.fileDescriptionModel;
+      logger.info(`fileDescriptionModel entry:`, JSON.stringify(phaseModelEntry));
+      const { model, thinkingLevel } = resolvePhaseModel(phaseModelEntry);
+
+      logger.info(`Resolved model: ${model}, thinkingLevel: ${thinkingLevel}`);
+
+      // Use simpleQuery - provider abstraction handles routing to correct provider
+      const result = await simpleQuery({
+        prompt,
+        model,
         cwd,
-        model: CLAUDE_MODEL_MAP.haiku,
         maxTurns: 1,
         allowedTools: [],
-        autoLoadClaudeMd,
-        sandbox: { enabled: true, autoAllowBashIfSandboxed: true },
+        thinkingLevel,
+        readOnly: true, // File description only reads, doesn't write
+        settingSources: autoLoadClaudeMd ? ['user', 'project', 'local'] : undefined,
       });
 
-      const promptGenerator = (async function* () {
-        yield {
-          type: 'user' as const,
-          session_id: '',
-          message: { role: 'user' as const, content: promptContent },
-          parent_tool_use_id: null,
-        };
-      })();
-
-      const stream = query({ prompt: promptGenerator, options: sdkOptions });
-
-      // Extract the description from the response
-      const description = await extractTextFromStream(stream);
+      const description = result.text;
 
       if (!description || description.trim().length === 0) {
         logger.warn('Received empty response from Claude');

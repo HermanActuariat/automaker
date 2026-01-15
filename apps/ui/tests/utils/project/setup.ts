@@ -6,7 +6,7 @@ import { Page } from '@playwright/test';
  */
 const STORE_VERSIONS = {
   APP_STORE: 2, // Must match app-store.ts persist version
-  SETUP_STORE: 0, // setup-store.ts doesn't specify a version, so zustand defaults to 0
+  SETUP_STORE: 1, // Must match setup-store.ts persist version
 } as const;
 
 /**
@@ -56,6 +56,7 @@ export async function setupWelcomeView(
           currentView: 'welcome',
           theme: 'dark',
           sidebarOpen: true,
+          skipSandboxWarning: true,
           apiKeys: { anthropic: '', google: '' },
           chatSessions: [],
           chatHistoryOpen: false,
@@ -80,6 +81,31 @@ export async function setupWelcomeView(
       if (opts?.workspaceDir) {
         localStorage.setItem('automaker:lastProjectDir', opts.workspaceDir);
       }
+
+      // Disable splash screen in tests
+      sessionStorage.setItem('automaker-splash-shown', 'true');
+
+      // Set up a mechanism to keep currentProject null even after settings hydration
+      // Settings API might restore a project, so we override it after hydration
+      // Use a flag to indicate we want welcome view
+      sessionStorage.setItem('automaker-test-welcome-view', 'true');
+
+      // Override currentProject after a short delay to ensure it happens after settings hydration
+      setTimeout(() => {
+        const storage = localStorage.getItem('automaker-storage');
+        if (storage) {
+          try {
+            const state = JSON.parse(storage);
+            if (state.state && sessionStorage.getItem('automaker-test-welcome-view') === 'true') {
+              state.state.currentProject = null;
+              state.state.currentView = 'welcome';
+              localStorage.setItem('automaker-storage', JSON.stringify(state));
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        }
+      }, 2000); // Wait 2 seconds for settings hydration to complete
     },
     { opts: options, versions: STORE_VERSIONS }
   );
@@ -135,6 +161,7 @@ export async function setupRealProject(
           currentView: currentProject ? 'board' : 'welcome',
           theme: 'dark',
           sidebarOpen: true,
+          skipSandboxWarning: true,
           apiKeys: { anthropic: '', google: '' },
           chatSessions: [],
           chatHistoryOpen: false,
@@ -154,6 +181,9 @@ export async function setupRealProject(
         version: versions.SETUP_STORE,
       };
       localStorage.setItem('automaker-setup', JSON.stringify(setupState));
+
+      // Disable splash screen in tests
+      sessionStorage.setItem('automaker-splash-shown', 'true');
     },
     { path: projectPath, name: projectName, opts: options, versions: STORE_VERSIONS }
   );
@@ -187,6 +217,9 @@ export async function setupMockProject(page: Page): Promise<void> {
     };
 
     localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   });
 }
 
@@ -258,6 +291,9 @@ export async function setupMockProjectAtConcurrencyLimit(
       };
 
       localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+      // Disable splash screen in tests
+      sessionStorage.setItem('automaker-splash-shown', 'true');
     },
     { maxConcurrency, runningTasks }
   );
@@ -313,6 +349,9 @@ export async function setupMockProjectWithFeatures(
     // Also store features in a global variable that the mock electron API can use
     // This is needed because the board-view loads features from the file system
     (window as any).__mockFeatures = mockFeatures;
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   }, options);
 }
 
@@ -349,6 +388,9 @@ export async function setupMockProjectWithContextFile(
       };
 
       localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+      // Disable splash screen in tests
+      sessionStorage.setItem('automaker-splash-shown', 'true');
 
       // Set up mock file system with a context file for the feature
       // This will be used by the mock electron API
@@ -468,6 +510,9 @@ export async function setupEmptyLocalStorage(page: Page): Promise<void> {
       version: 2, // Must match app-store.ts persist version
     };
     localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   });
 }
 
@@ -507,6 +552,9 @@ export async function setupMockProjectsWithoutCurrent(page: Page): Promise<void>
     };
 
     localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   });
 }
 
@@ -558,6 +606,9 @@ export async function setupMockProjectWithSkipTestsFeatures(
     };
 
     localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   }, options);
 }
 
@@ -630,6 +681,9 @@ export async function setupMockProjectWithAgentOutput(
       };
 
       localStorage.setItem('automaker-storage', JSON.stringify(mockState));
+
+      // Disable splash screen in tests
+      sessionStorage.setItem('automaker-splash-shown', 'true');
 
       // Set up mock file system with output content for the feature
       // Now uses features/{id}/agent-output.md path
@@ -747,6 +801,9 @@ export async function setupFirstRun(page: Page): Promise<void> {
     };
 
     localStorage.setItem('automaker-storage', JSON.stringify(appState));
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   });
 }
 
@@ -767,116 +824,8 @@ export async function setupComplete(page: Page): Promise<void> {
     };
 
     localStorage.setItem('automaker-setup', JSON.stringify(setupState));
+
+    // Disable splash screen in tests
+    sessionStorage.setItem('automaker-splash-shown', 'true');
   }, STORE_VERSIONS);
-}
-
-/**
- * Set up a mock project with AI profiles for testing the profiles view
- * Includes default built-in profiles and optionally custom profiles
- */
-export async function setupMockProjectWithProfiles(
-  page: Page,
-  options?: {
-    customProfilesCount?: number;
-    includeBuiltIn?: boolean;
-  }
-): Promise<void> {
-  await page.addInitScript((opts: typeof options) => {
-    const mockProject = {
-      id: 'test-project-1',
-      name: 'Test Project',
-      path: '/mock/test-project',
-      lastOpened: new Date().toISOString(),
-    };
-
-    // Default built-in profiles (same as DEFAULT_AI_PROFILES from app-store.ts)
-    const builtInProfiles = [
-      {
-        id: 'profile-heavy-task',
-        name: 'Heavy Task',
-        description:
-          'Claude Opus with Ultrathink for complex architecture, migrations, or deep debugging.',
-        model: 'opus' as const,
-        thinkingLevel: 'ultrathink' as const,
-        provider: 'claude' as const,
-        isBuiltIn: true,
-        icon: 'Brain',
-      },
-      {
-        id: 'profile-balanced',
-        name: 'Balanced',
-        description: 'Claude Sonnet with medium thinking for typical development tasks.',
-        model: 'sonnet' as const,
-        thinkingLevel: 'medium' as const,
-        provider: 'claude' as const,
-        isBuiltIn: true,
-        icon: 'Scale',
-      },
-      {
-        id: 'profile-quick-edit',
-        name: 'Quick Edit',
-        description: 'Claude Haiku for fast, simple edits and minor fixes.',
-        model: 'haiku' as const,
-        thinkingLevel: 'none' as const,
-        provider: 'claude' as const,
-        isBuiltIn: true,
-        icon: 'Zap',
-      },
-    ];
-
-    // Generate custom profiles if requested
-    const customProfiles = [];
-    const customCount = opts?.customProfilesCount ?? 0;
-    for (let i = 0; i < customCount; i++) {
-      customProfiles.push({
-        id: `custom-profile-${i + 1}`,
-        name: `Custom Profile ${i + 1}`,
-        description: `Test custom profile ${i + 1}`,
-        model: ['haiku', 'sonnet', 'opus'][i % 3] as 'haiku' | 'sonnet' | 'opus',
-        thinkingLevel: ['none', 'low', 'medium', 'high'][i % 4] as
-          | 'none'
-          | 'low'
-          | 'medium'
-          | 'high',
-        provider: 'claude' as const,
-        isBuiltIn: false,
-        icon: ['Brain', 'Zap', 'Scale', 'Cpu', 'Rocket', 'Sparkles'][i % 6],
-      });
-    }
-
-    // Combine profiles (built-in first, then custom)
-    const includeBuiltIn = opts?.includeBuiltIn !== false; // Default to true
-    const aiProfiles = includeBuiltIn ? [...builtInProfiles, ...customProfiles] : customProfiles;
-
-    const mockState = {
-      state: {
-        projects: [mockProject],
-        currentProject: mockProject,
-        theme: 'dark',
-        sidebarOpen: true,
-        apiKeys: { anthropic: '', google: '', openai: '' },
-        chatSessions: [],
-        chatHistoryOpen: false,
-        maxConcurrency: 3,
-        aiProfiles: aiProfiles,
-        features: [],
-        currentView: 'board', // Start at board, will navigate to profiles
-      },
-      version: 2, // Must match app-store.ts persist version
-    };
-
-    localStorage.setItem('automaker-storage', JSON.stringify(mockState));
-
-    // Also mark setup as complete to skip the setup wizard
-    const setupState = {
-      state: {
-        isFirstRun: false,
-        setupComplete: true,
-        currentStep: 'complete',
-        skipClaudeSetup: false,
-      },
-      version: 0, // setup-store.ts doesn't specify a version, so zustand defaults to 0
-    };
-    localStorage.setItem('automaker-setup', JSON.stringify(setupState));
-  }, options);
 }

@@ -1,5 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { createLogger } from '@automaker/utils/logger';
 import { useAppStore } from '@/store/app-store';
+
+const logger = createLogger('SpecGeneration');
 import { getElectronAPI } from '@/lib/electron';
 import { toast } from 'sonner';
 import { CheckCircle2 } from 'lucide-react';
@@ -78,8 +81,8 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           return;
         }
 
-        const status = await api.specRegeneration.status();
-        console.log(
+        const status = await api.specRegeneration.status(currentProject.path);
+        logger.debug(
           '[useSpecGeneration] Status check on mount:',
           status,
           'for project:',
@@ -87,9 +90,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
         );
 
         if (status.success && status.isRunning) {
-          console.log(
-            '[useSpecGeneration] Spec generation is running globally. Tentatively showing loader.'
-          );
+          logger.debug('[useSpecGeneration] Spec generation is running for this project.');
 
           setIsCreating(true);
           setIsRegenerating(true);
@@ -103,7 +104,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
             clearTimeout(pendingStatusTimeoutRef.current);
           }
           pendingStatusTimeoutRef.current = setTimeout(() => {
-            console.log(
+            logger.debug(
               '[useSpecGeneration] No events received for current project - clearing tentative state'
             );
             setIsCreating(false);
@@ -118,7 +119,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           stateRestoredRef.current = false;
         }
       } catch (error) {
-        console.error('[useSpecGeneration] Failed to check status:', error);
+        logger.error('[useSpecGeneration] Failed to check status:', error);
       } finally {
         statusCheckRef.current = false;
       }
@@ -140,11 +141,11 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           const api = getElectronAPI();
           if (!api.specRegeneration) return;
 
-          const status = await api.specRegeneration.status();
-          console.log('[useSpecGeneration] Visibility change - status check:', status);
+          const status = await api.specRegeneration.status(currentProject.path);
+          logger.debug('[useSpecGeneration] Visibility change - status check:', status);
 
           if (!status.isRunning) {
-            console.log(
+            logger.debug(
               '[useSpecGeneration] Visibility change: Backend indicates generation complete - clearing state'
             );
             setIsCreating(false);
@@ -157,7 +158,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
             setCurrentPhase(status.currentPhase);
           }
         } catch (error) {
-          console.error('[useSpecGeneration] Failed to check status on visibility change:', error);
+          logger.error('[useSpecGeneration] Failed to check status on visibility change:', error);
         }
       }
     };
@@ -177,10 +178,10 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
         const api = getElectronAPI();
         if (!api.specRegeneration) return;
 
-        const status = await api.specRegeneration.status();
+        const status = await api.specRegeneration.status(currentProject.path);
 
         if (!status.isRunning) {
-          console.log(
+          logger.debug(
             '[useSpecGeneration] Periodic check: Backend indicates generation complete - clearing state'
           );
           setIsCreating(false);
@@ -190,14 +191,14 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           stateRestoredRef.current = false;
           loadSpec();
         } else if (status.currentPhase && status.currentPhase !== currentPhase) {
-          console.log('[useSpecGeneration] Periodic check: Phase updated from backend', {
+          logger.debug('[useSpecGeneration] Periodic check: Phase updated from backend', {
             old: currentPhase,
             new: status.currentPhase,
           });
           setCurrentPhase(status.currentPhase);
         }
       } catch (error) {
-        console.error('[useSpecGeneration] Periodic status check error:', error);
+        logger.error('[useSpecGeneration] Periodic status check error:', error);
       }
     }, STATUS_CHECK_INTERVAL_MS);
 
@@ -214,7 +215,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
     if (!api.specRegeneration) return;
 
     const unsubscribe = api.specRegeneration.onEvent((event: SpecRegenerationEvent) => {
-      console.log(
+      logger.debug(
         '[useSpecGeneration] Regeneration event:',
         event.type,
         'for project:',
@@ -224,14 +225,14 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
       );
 
       if (event.projectPath !== currentProject?.path) {
-        console.log('[useSpecGeneration] Ignoring event - not for current project');
+        logger.debug('[useSpecGeneration] Ignoring event - not for current project');
         return;
       }
 
       if (pendingStatusTimeoutRef.current) {
         clearTimeout(pendingStatusTimeoutRef.current);
         pendingStatusTimeoutRef.current = null;
-        console.log(
+        logger.debug(
           '[useSpecGeneration] Event confirmed this is for current project - clearing timeout'
         );
       }
@@ -244,10 +245,10 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
         if (phaseMatch) {
           const phase = phaseMatch[1];
           setCurrentPhase(phase);
-          console.log(`[useSpecGeneration] Phase updated: ${phase}`);
+          logger.debug(`[useSpecGeneration] Phase updated: ${phase}`);
 
           if (phase === 'complete') {
-            console.log('[useSpecGeneration] Phase is complete - clearing state');
+            logger.debug('[useSpecGeneration] Phase is complete - clearing state');
             setIsCreating(false);
             setIsRegenerating(false);
             stateRestoredRef.current = false;
@@ -261,7 +262,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           event.content.includes('All tasks completed') ||
           event.content.includes('✓ All tasks completed')
         ) {
-          console.log(
+          logger.debug(
             '[useSpecGeneration] Detected completion in progress message - clearing state'
           );
           setIsCreating(false);
@@ -276,7 +277,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
         const newLog = logsRef.current + event.content;
         logsRef.current = newLog;
         setLogs(newLog);
-        console.log('[useSpecGeneration] Progress:', event.content.substring(0, 100));
+        logger.debug('[useSpecGeneration] Progress:', event.content.substring(0, 100));
 
         if (errorMessage) {
           setErrorMessage('');
@@ -292,7 +293,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
             setCurrentPhase('feature_generation');
             setIsCreating(true);
             setIsRegenerating(true);
-            console.log(
+            logger.debug(
               '[useSpecGeneration] Detected feature creation tool - setting phase to feature_generation'
             );
           }
@@ -305,7 +306,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
         const newLog = logsRef.current + toolLog;
         logsRef.current = newLog;
         setLogs(newLog);
-        console.log('[useSpecGeneration] Tool:', event.tool, event.input);
+        logger.debug('[useSpecGeneration] Tool:', event.tool, event.input);
       } else if (event.type === 'spec_regeneration_complete') {
         const completionLog = logsRef.current + `\n[Complete] ${event.message}\n`;
         logsRef.current = completionLog;
@@ -328,7 +329,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           (isFinalCompletionMessage || hasCompletePhase) && !isIntermediateCompletion;
 
         if (shouldComplete) {
-          console.log('[useSpecGeneration] Final completion detected - clearing state', {
+          logger.debug('[useSpecGeneration] Final completion detected - clearing state', {
             isFinalCompletionMessage,
             hasCompletePhase,
             message: event.message,
@@ -367,12 +368,12 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
           setIsCreating(true);
           setIsRegenerating(true);
           setCurrentPhase('feature_generation');
-          console.log(
+          logger.debug(
             '[useSpecGeneration] Intermediate completion, continuing with feature generation'
           );
         }
 
-        console.log('[useSpecGeneration] Spec generation event:', event.message);
+        logger.debug('[useSpecGeneration] Spec generation event:', event.message);
       } else if (event.type === 'spec_regeneration_error') {
         setIsRegenerating(false);
         setIsCreating(false);
@@ -383,7 +384,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
         const errorLog = logsRef.current + `\n\n[ERROR] ${event.error}\n`;
         logsRef.current = errorLog;
         setLogs(errorLog);
-        console.error('[useSpecGeneration] Regeneration error:', event.error);
+        logger.error('[useSpecGeneration] Regeneration error:', event.error);
       }
     });
 
@@ -402,11 +403,11 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
     setErrorMessage('');
     logsRef.current = '';
     setLogs('');
-    console.log('[useSpecGeneration] Starting spec creation, generateFeatures:', generateFeatures);
+    logger.debug('[useSpecGeneration] Starting spec creation, generateFeatures:', generateFeatures);
     try {
       const api = getElectronAPI();
       if (!api.specRegeneration) {
-        console.error('[useSpecGeneration] Spec regeneration not available');
+        logger.error('[useSpecGeneration] Spec regeneration not available');
         setIsCreating(false);
         return;
       }
@@ -420,7 +421,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
 
       if (!result.success) {
         const errorMsg = result.error || 'Unknown error';
-        console.error('[useSpecGeneration] Failed to start spec creation:', errorMsg);
+        logger.error('[useSpecGeneration] Failed to start spec creation:', errorMsg);
         setIsCreating(false);
         setCurrentPhase('error');
         setErrorMessage(errorMsg);
@@ -430,7 +431,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('[useSpecGeneration] Failed to create spec:', errorMsg);
+      logger.error('[useSpecGeneration] Failed to create spec:', errorMsg);
       setIsCreating(false);
       setCurrentPhase('error');
       setErrorMessage(errorMsg);
@@ -455,14 +456,14 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
     setErrorMessage('');
     logsRef.current = '';
     setLogs('');
-    console.log(
+    logger.debug(
       '[useSpecGeneration] Starting spec regeneration, generateFeatures:',
       generateFeaturesOnRegenerate
     );
     try {
       const api = getElectronAPI();
       if (!api.specRegeneration) {
-        console.error('[useSpecGeneration] Spec regeneration not available');
+        logger.error('[useSpecGeneration] Spec regeneration not available');
         setIsRegenerating(false);
         return;
       }
@@ -476,7 +477,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
 
       if (!result.success) {
         const errorMsg = result.error || 'Unknown error';
-        console.error('[useSpecGeneration] Failed to start regeneration:', errorMsg);
+        logger.error('[useSpecGeneration] Failed to start regeneration:', errorMsg);
         setIsRegenerating(false);
         setCurrentPhase('error');
         setErrorMessage(errorMsg);
@@ -486,7 +487,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('[useSpecGeneration] Failed to regenerate spec:', errorMsg);
+      logger.error('[useSpecGeneration] Failed to regenerate spec:', errorMsg);
       setIsRegenerating(false);
       setCurrentPhase('error');
       setErrorMessage(errorMsg);
@@ -511,11 +512,11 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
     setErrorMessage('');
     logsRef.current = '';
     setLogs('');
-    console.log('[useSpecGeneration] Starting feature generation from existing spec');
+    logger.debug('[useSpecGeneration] Starting feature generation from existing spec');
     try {
       const api = getElectronAPI();
       if (!api.specRegeneration) {
-        console.error('[useSpecGeneration] Spec regeneration not available');
+        logger.error('[useSpecGeneration] Spec regeneration not available');
         setIsGeneratingFeatures(false);
         return;
       }
@@ -523,7 +524,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
 
       if (!result.success) {
         const errorMsg = result.error || 'Unknown error';
-        console.error('[useSpecGeneration] Failed to start feature generation:', errorMsg);
+        logger.error('[useSpecGeneration] Failed to start feature generation:', errorMsg);
         setIsGeneratingFeatures(false);
         setCurrentPhase('error');
         setErrorMessage(errorMsg);
@@ -533,7 +534,7 @@ export function useSpecGeneration({ loadSpec }: UseSpecGenerationOptions) {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error('[useSpecGeneration] Failed to generate features:', errorMsg);
+      logger.error('[useSpecGeneration] Failed to generate features:', errorMsg);
       setIsGeneratingFeatures(false);
       setCurrentPhase('error');
       setErrorMessage(errorMsg);

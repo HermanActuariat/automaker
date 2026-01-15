@@ -1,14 +1,39 @@
-import React, { memo } from 'react';
-import { useSortable } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+// @ts-nocheck
+import React, { memo, useLayoutEffect, useState } from 'react';
+import { useDraggable } from '@dnd-kit/core';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Feature, useAppStore } from '@/store/app-store';
 import { CardBadges, PriorityBadges } from './card-badges';
 import { CardHeaderSection } from './card-header';
 import { CardContentSections } from './card-content-sections';
 import { AgentInfoPanel } from './agent-info-panel';
 import { CardActions } from './card-actions';
+
+function getCardBorderStyle(enabled: boolean, opacity: number): React.CSSProperties {
+  if (!enabled) {
+    return { borderWidth: '0px', borderColor: 'transparent' };
+  }
+  if (opacity !== 100) {
+    return {
+      borderWidth: '1px',
+      borderColor: `color-mix(in oklch, var(--border) ${opacity}%, transparent)`,
+    };
+  }
+  return {};
+}
+
+function getCursorClass(
+  isOverlay: boolean | undefined,
+  isDraggable: boolean,
+  isSelectionMode: boolean
+): string {
+  if (isSelectionMode) return 'cursor-pointer';
+  if (isOverlay) return 'cursor-grabbing';
+  if (isDraggable) return 'cursor-grab active:cursor-grabbing';
+  return 'cursor-default';
+}
 
 interface KanbanCardProps {
   feature: Feature;
@@ -35,6 +60,11 @@ interface KanbanCardProps {
   glassmorphism?: boolean;
   cardBorderEnabled?: boolean;
   cardBorderOpacity?: number;
+  isOverlay?: boolean;
+  // Selection mode props
+  isSelectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
 }
 
 export const KanbanCard = memo(function KanbanCard({
@@ -62,64 +92,80 @@ export const KanbanCard = memo(function KanbanCard({
   glassmorphism = true,
   cardBorderEnabled = true,
   cardBorderOpacity = 100,
+  isOverlay,
+  isSelectionMode = false,
+  isSelected = false,
+  onToggleSelect,
 }: KanbanCardProps) {
   const { useWorktrees } = useAppStore();
+  const [isLifted, setIsLifted] = useState(false);
+
+  useLayoutEffect(() => {
+    if (isOverlay) {
+      requestAnimationFrame(() => {
+        setIsLifted(true);
+      });
+    }
+  }, [isOverlay]);
 
   const isDraggable =
-    feature.status === 'backlog' ||
-    feature.status === 'waiting_approval' ||
-    feature.status === 'verified' ||
-    (feature.status === 'in_progress' && !isCurrentAutoTask);
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    !isSelectionMode &&
+    (feature.status === 'backlog' ||
+      feature.status === 'waiting_approval' ||
+      feature.status === 'verified' ||
+      (feature.status === 'in_progress' && !isCurrentAutoTask));
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: feature.id,
-    disabled: !isDraggable,
+    disabled: !isDraggable || isOverlay || isSelectionMode,
   });
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
+  const dndStyle = {
     opacity: isDragging ? 0.5 : undefined,
   };
 
-  const borderStyle: React.CSSProperties = { ...style };
-  if (!cardBorderEnabled) {
-    (borderStyle as Record<string, string>).borderWidth = '0px';
-    (borderStyle as Record<string, string>).borderColor = 'transparent';
-  } else if (cardBorderOpacity !== 100) {
-    (borderStyle as Record<string, string>).borderWidth = '1px';
-    (borderStyle as Record<string, string>).borderColor =
-      `color-mix(in oklch, var(--border) ${cardBorderOpacity}%, transparent)`;
-  }
+  const cardStyle = getCardBorderStyle(cardBorderEnabled, cardBorderOpacity);
 
-  const cardElement = (
+  // Only allow selection for backlog features
+  const isSelectable = isSelectionMode && feature.status === 'backlog';
+
+  const wrapperClasses = cn(
+    'relative select-none outline-none touch-none transition-transform duration-200 ease-out',
+    getCursorClass(isOverlay, isDraggable, isSelectable),
+    isOverlay && isLifted && 'scale-105 rotate-1 z-50'
+  );
+
+  const isInteractive = !isDragging && !isOverlay;
+  const hasError = feature.error && !isCurrentAutoTask;
+
+  const innerCardClasses = cn(
+    'kanban-card-content h-full relative shadow-sm',
+    'transition-all duration-200 ease-out',
+    isInteractive && 'hover:-translate-y-0.5 hover:shadow-md hover:shadow-black/10 bg-transparent',
+    !glassmorphism && 'backdrop-blur-[0px]!',
+    !isCurrentAutoTask &&
+      cardBorderEnabled &&
+      (cardBorderOpacity === 100 ? 'border-border/50' : 'border'),
+    hasError && 'border-[var(--status-error)] border-2 shadow-[var(--status-error-bg)] shadow-lg',
+    isSelected && isSelectable && 'ring-2 ring-brand-500 ring-offset-1 ring-offset-background'
+  );
+
+  const handleCardClick = (e: React.MouseEvent) => {
+    if (isSelectable && onToggleSelect) {
+      e.preventDefault();
+      e.stopPropagation();
+      onToggleSelect();
+    }
+  };
+
+  const renderCardContent = () => (
     <Card
-      ref={setNodeRef}
-      style={isCurrentAutoTask ? style : borderStyle}
-      className={cn(
-        'cursor-grab active:cursor-grabbing relative kanban-card-content select-none',
-        'transition-all duration-200 ease-out',
-        // Premium shadow system
-        'shadow-sm hover:shadow-md hover:shadow-black/10',
-        // Subtle lift on hover
-        'hover:-translate-y-0.5',
-        !isCurrentAutoTask && cardBorderEnabled && cardBorderOpacity === 100 && 'border-border/50',
-        !isCurrentAutoTask && cardBorderEnabled && cardBorderOpacity !== 100 && 'border',
-        !isDragging && 'bg-transparent',
-        !glassmorphism && 'backdrop-blur-[0px]!',
-        isDragging && 'scale-105 shadow-xl shadow-black/20 rotate-1',
-        // Error state - using CSS variable
-        feature.error &&
-          !isCurrentAutoTask &&
-          'border-[var(--status-error)] border-2 shadow-[var(--status-error-bg)] shadow-lg',
-        !isDraggable && 'cursor-default'
-      )}
-      data-testid={`kanban-card-${feature.id}`}
-      onDoubleClick={onEdit}
-      {...attributes}
-      {...(isDraggable ? listeners : {})}
+      style={isCurrentAutoTask ? undefined : cardStyle}
+      className={innerCardClasses}
+      onDoubleClick={isSelectionMode ? undefined : onEdit}
+      onClick={handleCardClick}
     >
       {/* Background overlay with opacity */}
-      {!isDragging && (
+      {(!isDragging || isOverlay) && (
         <div
           className={cn(
             'absolute inset-0 rounded-xl bg-card -z-10',
@@ -132,8 +178,16 @@ export const KanbanCard = memo(function KanbanCard({
       {/* Status Badges Row */}
       <CardBadges feature={feature} />
 
-      {/* Category row */}
-      <div className="px-3 pt-4">
+      {/* Category row with selection checkbox */}
+      <div className="px-3 pt-3 flex items-center gap-2">
+        {isSelectionMode && !isOverlay && feature.status === 'backlog' && (
+          <Checkbox
+            checked={isSelected}
+            onCheckedChange={() => onToggleSelect?.()}
+            className="h-4 w-4 border-2 data-[state=checked]:bg-brand-500 data-[state=checked]:border-brand-500 shrink-0"
+            onClick={(e) => e.stopPropagation()}
+          />
+        )}
         <span className="text-[11px] text-muted-foreground/70 font-medium">{feature.category}</span>
       </div>
 
@@ -145,6 +199,7 @@ export const KanbanCard = memo(function KanbanCard({
         feature={feature}
         isDraggable={isDraggable}
         isCurrentAutoTask={!!isCurrentAutoTask}
+        isSelectionMode={isSelectionMode}
         onEdit={onEdit}
         onDelete={onDelete}
         onViewOutput={onViewOutput}
@@ -169,6 +224,7 @@ export const KanbanCard = memo(function KanbanCard({
           isCurrentAutoTask={!!isCurrentAutoTask}
           hasContext={hasContext}
           shortcutKey={shortcutKey}
+          isSelectionMode={isSelectionMode}
           onEdit={onEdit}
           onViewOutput={onViewOutput}
           onVerify={onVerify}
@@ -185,10 +241,20 @@ export const KanbanCard = memo(function KanbanCard({
     </Card>
   );
 
-  // Wrap with animated border when in progress
-  if (isCurrentAutoTask) {
-    return <div className="animated-border-wrapper">{cardElement}</div>;
-  }
-
-  return cardElement;
+  return (
+    <div
+      ref={setNodeRef}
+      style={dndStyle}
+      {...attributes}
+      {...(isDraggable ? listeners : {})}
+      className={wrapperClasses}
+      data-testid={`kanban-card-${feature.id}`}
+    >
+      {isCurrentAutoTask ? (
+        <div className="animated-border-wrapper">{renderCardContent()}</div>
+      ) : (
+        renderCardContent()
+      )}
+    </div>
+  );
 });

@@ -4,7 +4,7 @@
  */
 
 import path from 'path';
-import type { Feature } from '@automaker/types';
+import type { Feature, DescriptionHistoryEntry } from '@automaker/types';
 import { createLogger } from '@automaker/utils';
 import * as secureFs from '../lib/secure-fs.js';
 import {
@@ -56,10 +56,10 @@ export class FeatureLoader {
         try {
           // Paths are now absolute
           await secureFs.unlink(oldPath);
-          console.log(`[FeatureLoader] Deleted orphaned image: ${oldPath}`);
+          logger.info(`Deleted orphaned image: ${oldPath}`);
         } catch (error) {
           // Ignore errors when deleting (file may already be gone)
-          logger.warn(`[FeatureLoader] Failed to delete image: ${oldPath}`, error);
+          logger.warn(`Failed to delete image: ${oldPath}`, error);
         }
       }
     }
@@ -101,7 +101,7 @@ export class FeatureLoader {
         try {
           await secureFs.access(fullOriginalPath);
         } catch {
-          logger.warn(`[FeatureLoader] Image not found, skipping: ${fullOriginalPath}`);
+          logger.warn(`Image not found, skipping: ${fullOriginalPath}`);
           continue;
         }
 
@@ -111,7 +111,7 @@ export class FeatureLoader {
 
         // Copy the file
         await secureFs.copyFile(fullOriginalPath, newPath);
-        console.log(`[FeatureLoader] Copied image: ${originalPath} -> ${newPath}`);
+        logger.info(`Copied image: ${originalPath} -> ${newPath}`);
 
         // Try to delete the original temp file
         try {
@@ -159,6 +159,13 @@ export class FeatureLoader {
   }
 
   /**
+   * Get the path to a feature's raw-output.jsonl file
+   */
+  getRawOutputPath(projectPath: string, featureId: string): string {
+    return path.join(this.getFeatureDir(projectPath, featureId), 'raw-output.jsonl');
+  }
+
+  /**
    * Generate a new feature ID
    */
   generateFeatureId(): string {
@@ -185,9 +192,8 @@ export class FeatureLoader {
       })) as any[];
       const featureDirs = entries.filter((entry) => entry.isDirectory());
 
-      // Load each feature
-      const features: Feature[] = [];
-      for (const dir of featureDirs) {
+      // Load all features concurrently (secureFs has built-in concurrency limiting)
+      const featurePromises = featureDirs.map(async (dir) => {
         const featureId = dir.name;
         const featureJsonPath = this.getFeatureJsonPath(projectPath, featureId);
 
@@ -196,28 +202,25 @@ export class FeatureLoader {
           const feature = JSON.parse(content);
 
           if (!feature.id) {
-            logger.warn(
-              `[FeatureLoader] Feature ${featureId} missing required 'id' field, skipping`
-            );
-            continue;
+            logger.warn(`Feature ${featureId} missing required 'id' field, skipping`);
+            return null;
           }
 
-          features.push(feature);
+          return feature as Feature;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            continue;
+            return null;
           } else if (error instanceof SyntaxError) {
-            logger.warn(
-              `[FeatureLoader] Failed to parse feature.json for ${featureId}: ${error.message}`
-            );
+            logger.warn(`Failed to parse feature.json for ${featureId}: ${error.message}`);
           } else {
-            logger.error(
-              `[FeatureLoader] Failed to load feature ${featureId}:`,
-              (error as Error).message
-            );
+            logger.error(`Failed to load feature ${featureId}:`, (error as Error).message);
           }
+          return null;
         }
-      }
+      });
+
+      const results = await Promise.all(featurePromises);
+      const features = results.filter((f): f is Feature => f !== null);
 
       // Sort by creation order (feature IDs contain timestamp)
       features.sort((a, b) => {
@@ -245,7 +248,7 @@ export class FeatureLoader {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return null;
       }
-      logger.error(`[FeatureLoader] Failed to get feature ${featureId}:`, error);
+      logger.error(`Failed to get feature ${featureId}:`, error);
       throw error;
     }
   }
@@ -271,6 +274,16 @@ export class FeatureLoader {
       featureData.imagePaths
     );
 
+    // Initialize description history with the initial description
+    const initialHistory: DescriptionHistoryEntry[] = [];
+    if (featureData.description && featureData.description.trim()) {
+      initialHistory.push({
+        description: featureData.description,
+        timestamp: new Date().toISOString(),
+        source: 'initial',
+      });
+    }
+
     // Ensure feature has required fields
     const feature: Feature = {
       category: featureData.category || 'Uncategorized',
@@ -278,6 +291,7 @@ export class FeatureLoader {
       ...featureData,
       id: featureId,
       imagePaths: migratedImagePaths,
+      descriptionHistory: initialHistory,
     };
 
     // Write feature.json
@@ -289,11 +303,20 @@ export class FeatureLoader {
 
   /**
    * Update a feature (partial updates supported)
+   * @param projectPath - Path to the project
+   * @param featureId - ID of the feature to update
+   * @param updates - Partial feature updates
+   * @param descriptionHistorySource - Source of description change ('enhance' or 'edit')
+   * @param enhancementMode - Enhancement mode if source is 'enhance'
+   * @param preEnhancementDescription - Description before enhancement (for restoring original)
    */
   async update(
     projectPath: string,
     featureId: string,
-    updates: Partial<Feature>
+    updates: Partial<Feature>,
+    descriptionHistorySource?: 'enhance' | 'edit',
+    enhancementMode?: 'improve' | 'technical' | 'simplify' | 'acceptance' | 'ux-reviewer',
+    preEnhancementDescription?: string
   ): Promise<Feature> {
     const feature = await this.get(projectPath, featureId);
     if (!feature) {
@@ -310,11 +333,50 @@ export class FeatureLoader {
       updatedImagePaths = await this.migrateImages(projectPath, featureId, updates.imagePaths);
     }
 
+    // Track description history if description changed
+    let updatedHistory = feature.descriptionHistory || [];
+    if (
+      updates.description !== undefined &&
+      updates.description !== feature.description &&
+      updates.description.trim()
+    ) {
+      const timestamp = new Date().toISOString();
+
+      // If this is an enhancement and we have the pre-enhancement description,
+      // add the original text to history first (so user can restore to it)
+      if (
+        descriptionHistorySource === 'enhance' &&
+        preEnhancementDescription &&
+        preEnhancementDescription.trim()
+      ) {
+        // Check if this pre-enhancement text is different from the last history entry
+        const lastEntry = updatedHistory[updatedHistory.length - 1];
+        if (!lastEntry || lastEntry.description !== preEnhancementDescription) {
+          const preEnhanceEntry: DescriptionHistoryEntry = {
+            description: preEnhancementDescription,
+            timestamp,
+            source: updatedHistory.length === 0 ? 'initial' : 'edit',
+          };
+          updatedHistory = [...updatedHistory, preEnhanceEntry];
+        }
+      }
+
+      // Add the new/enhanced description to history
+      const historyEntry: DescriptionHistoryEntry = {
+        description: updates.description,
+        timestamp,
+        source: descriptionHistorySource || 'edit',
+        ...(descriptionHistorySource === 'enhance' && enhancementMode ? { enhancementMode } : {}),
+      };
+      updatedHistory = [...updatedHistory, historyEntry];
+    }
+
     // Merge updates
     const updatedFeature: Feature = {
       ...feature,
       ...updates,
       ...(updatedImagePaths !== undefined ? { imagePaths: updatedImagePaths } : {}),
+      descriptionHistory: updatedHistory,
     };
 
     // Write back to file
@@ -332,10 +394,10 @@ export class FeatureLoader {
     try {
       const featureDir = this.getFeatureDir(projectPath, featureId);
       await secureFs.rm(featureDir, { recursive: true, force: true });
-      console.log(`[FeatureLoader] Deleted feature ${featureId}`);
+      logger.info(`Deleted feature ${featureId}`);
       return true;
     } catch (error) {
-      logger.error(`[FeatureLoader] Failed to delete feature ${featureId}:`, error);
+      logger.error(`Failed to delete feature ${featureId}:`, error);
       return false;
     }
   }
@@ -352,7 +414,24 @@ export class FeatureLoader {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return null;
       }
-      logger.error(`[FeatureLoader] Failed to get agent output for ${featureId}:`, error);
+      logger.error(`Failed to get agent output for ${featureId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get raw output for a feature (JSONL format for debugging)
+   */
+  async getRawOutput(projectPath: string, featureId: string): Promise<string | null> {
+    try {
+      const rawOutputPath = this.getRawOutputPath(projectPath, featureId);
+      const content = (await secureFs.readFile(rawOutputPath, 'utf-8')) as string;
+      return content;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      logger.error(`Failed to get raw output for ${featureId}:`, error);
       throw error;
     }
   }

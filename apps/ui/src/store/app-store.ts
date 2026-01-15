@@ -1,19 +1,51 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+// Note: persist middleware removed - settings now sync via API (use-settings-sync.ts)
 import type { Project, TrashedProject } from '@/lib/electron';
+import { getElectronAPI } from '@/lib/electron';
+import { createLogger } from '@automaker/utils/logger';
+import { setItem, getItem } from '@/lib/storage';
 import type {
   Feature as BaseFeature,
   FeatureImagePath,
-  AgentModel,
+  FeatureTextFilePath,
+  ModelAlias,
   PlanningMode,
-  AIProfile,
+  ThinkingLevel,
+  ModelProvider,
+  CursorModelId,
+  CodexModelId,
+  OpencodeModelId,
+  PhaseModelConfig,
+  PhaseModelKey,
+  PhaseModelEntry,
+  MCPServerConfig,
   FeatureStatusWithPipeline,
   PipelineConfig,
   PipelineStep,
+  PromptCustomization,
+  ModelDefinition,
+} from '@automaker/types';
+import {
+  getAllCursorModelIds,
+  getAllCodexModelIds,
+  getAllOpencodeModelIds,
+  DEFAULT_PHASE_MODELS,
+  DEFAULT_OPENCODE_MODEL,
 } from '@automaker/types';
 
-// Re-export ThemeMode for convenience
-export type { ThemeMode };
+const logger = createLogger('AppStore');
+const OPENCODE_BEDROCK_PROVIDER_ID = 'amazon-bedrock';
+const OPENCODE_BEDROCK_MODEL_PREFIX = `${OPENCODE_BEDROCK_PROVIDER_ID}/`;
+
+// Re-export types for convenience
+export type {
+  ModelAlias,
+  PlanningMode,
+  ThinkingLevel,
+  ModelProvider,
+  FeatureTextFilePath,
+  FeatureImagePath,
+};
 
 export type ViewMode =
   | 'welcome'
@@ -24,10 +56,10 @@ export type ViewMode =
   | 'settings'
   | 'interview'
   | 'context'
-  | 'profiles'
   | 'running-agents'
   | 'terminal'
-  | 'wiki';
+  | 'wiki'
+  | 'ideation';
 
 export type ThemeMode =
   | 'light'
@@ -48,7 +80,51 @@ export type ThemeMode =
   | 'sunset'
   | 'gray';
 
-export type KanbanCardDetailLevel = 'minimal' | 'standard' | 'detailed';
+// LocalStorage key for theme persistence (fallback when server settings aren't available)
+export const THEME_STORAGE_KEY = 'automaker:theme';
+
+// Maximum number of output lines to keep in init script state (prevents unbounded memory growth)
+export const MAX_INIT_OUTPUT_LINES = 500;
+
+/**
+ * Get the theme from localStorage as a fallback
+ * Used before server settings are loaded (e.g., on login/setup pages)
+ */
+export function getStoredTheme(): ThemeMode | null {
+  const stored = getItem(THEME_STORAGE_KEY);
+  if (stored) return stored as ThemeMode;
+
+  // Backwards compatibility: older versions stored theme inside the Zustand persist blob.
+  // We intentionally keep reading it as a fallback so users don't get a "default theme flash"
+  // on login/logged-out pages if THEME_STORAGE_KEY hasn't been written yet.
+  try {
+    const legacy = getItem('automaker-storage');
+    if (!legacy) return null;
+    const parsed = JSON.parse(legacy) as { state?: { theme?: unknown } } | { theme?: unknown };
+    const theme = (parsed as any)?.state?.theme ?? (parsed as any)?.theme;
+    if (typeof theme === 'string' && theme.length > 0) {
+      return theme as ThemeMode;
+    }
+  } catch {
+    // Ignore legacy parse errors
+  }
+
+  return null;
+}
+
+/**
+ * Save theme to localStorage for immediate persistence
+ * This is used as a fallback when server settings can't be loaded
+ */
+function saveThemeToStorage(theme: ThemeMode): void {
+  setItem(THEME_STORAGE_KEY, theme);
+}
+
+function persistEffectiveThemeForProject(project: Project | null, fallbackTheme: ThemeMode): void {
+  const projectTheme = project?.theme as ThemeMode | undefined;
+  const themeToStore = projectTheme ?? fallbackTheme;
+  saveThemeToStorage(themeToStore);
+}
 
 export type BoardViewMode = 'kanban' | 'graph';
 
@@ -146,12 +222,16 @@ export function formatShortcut(shortcut: string | undefined | null, forDisplay =
 export interface KeyboardShortcuts {
   // Navigation shortcuts
   board: string;
+  graph: string;
   agent: string;
   spec: string;
   context: string;
+  memory: string;
   settings: string;
-  profiles: string;
   terminal: string;
+  ideation: string;
+  githubIssues: string;
+  githubPrs: string;
 
   // UI shortcuts
   toggleSidebar: string;
@@ -165,7 +245,6 @@ export interface KeyboardShortcuts {
   projectPicker: string;
   cyclePrevProject: string;
   cycleNextProject: string;
-  addProfile: string;
 
   // Terminal shortcuts
   splitTerminalRight: string;
@@ -178,18 +257,22 @@ export interface KeyboardShortcuts {
 export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcuts = {
   // Navigation
   board: 'K',
+  graph: 'H',
   agent: 'A',
   spec: 'D',
   context: 'C',
+  memory: 'Y',
   settings: 'S',
-  profiles: 'M',
   terminal: 'T',
+  ideation: 'I',
+  githubIssues: 'G',
+  githubPrs: 'R',
 
   // UI
   toggleSidebar: '`',
 
   // Actions
-  // Note: Some shortcuts share the same key (e.g., "N" for addFeature, newSession, addProfile)
+  // Note: Some shortcuts share the same key (e.g., "N" for addFeature, newSession)
   // This is intentional as they are context-specific and only active in their respective views
   addFeature: 'N', // Only active in board view
   addContextFile: 'N', // Only active in context view
@@ -199,7 +282,6 @@ export const DEFAULT_KEYBOARD_SHORTCUTS: KeyboardShortcuts = {
   projectPicker: 'P', // Global shortcut
   cyclePrevProject: 'Q', // Global shortcut
   cycleNextProject: 'E', // Global shortcut
-  addProfile: 'N', // Only active in profiles view
 
   // Terminal shortcuts (only active in terminal view)
   // Using Alt modifier to avoid conflicts with both terminal signals AND browser shortcuts
@@ -258,7 +340,7 @@ export type ClaudeModel = 'opus' | 'sonnet' | 'haiku';
 
 export interface Feature extends Omit<
   BaseFeature,
-  'steps' | 'imagePaths' | 'textFilePaths' | 'status'
+  'steps' | 'imagePaths' | 'textFilePaths' | 'status' | 'planSpec'
 > {
   id: string;
   title?: string;
@@ -272,6 +354,7 @@ export interface Feature extends Omit<
   textFilePaths?: FeatureTextFilePath[]; // Text file attachments for context
   justFinishedAt?: string; // UI-specific: ISO timestamp when agent just finished
   prUrl?: string; // UI-specific: Pull request URL
+  planSpec?: PlanSpec; // Explicit planSpec type to override BaseFeature's index signature
 }
 
 // Parsed task from spec (for spec and full planning modes)
@@ -393,6 +476,14 @@ export interface PersistedTerminalSettings {
   maxSessions: number;
 }
 
+/** State for worktree init script execution */
+export interface InitScriptState {
+  status: 'idle' | 'running' | 'success' | 'failed';
+  branch: string;
+  output: string[];
+  error?: string;
+}
+
 export interface AppState {
   // Project state
   projects: Project[];
@@ -440,15 +531,18 @@ export interface AppState {
   maxConcurrency: number; // Maximum number of concurrent agent tasks
 
   // Kanban Card Display Settings
-  kanbanCardDetailLevel: KanbanCardDetailLevel; // Level of detail shown on kanban cards
   boardViewMode: BoardViewMode; // Whether to show kanban or dependency graph view
 
   // Feature Default Settings
   defaultSkipTests: boolean; // Default value for skip tests when creating new features
   enableDependencyBlocking: boolean; // When true, show blocked badges and warnings for features with incomplete dependencies (default: true)
+  skipVerificationInAutoMode: boolean; // When true, auto-mode grabs features even if dependencies are not verified (only checks they're not running)
+  enableAiCommitMessages: boolean; // When true, auto-generate commit messages using AI when opening commit dialog
+  planUseSelectedWorktreeBranch: boolean; // When true, Plan dialog creates features on the currently selected worktree branch
+  addFeatureUseSelectedWorktreeBranch: boolean; // When true, Add Feature dialog defaults to custom mode with selected worktree branch
 
   // Worktree Settings
-  useWorktrees: boolean; // Whether to use git worktree isolation for features (default: false)
+  useWorktrees: boolean; // Whether to use git worktree isolation for features (default: true)
 
   // User-managed Worktrees (per-project)
   // projectPath -> { path: worktreePath or null for main, branch: branch name }
@@ -464,12 +558,6 @@ export interface AppState {
     }>
   >;
 
-  // AI Profiles
-  aiProfiles: AIProfile[];
-
-  // Profile Display Settings
-  showProfilesOnly: boolean; // When true, hide model tweaking options and show only profile selection
-
   // Keyboard Shortcuts
   keyboardShortcuts: KeyboardShortcuts; // User-defined keyboard shortcuts
 
@@ -477,14 +565,67 @@ export interface AppState {
   muteDoneSound: boolean; // When true, mute the notification sound when agents complete (default: false)
 
   // Enhancement Model Settings
-  enhancementModel: AgentModel; // Model used for feature enhancement (default: sonnet)
+  enhancementModel: ModelAlias; // Model used for feature enhancement (default: sonnet)
 
   // Validation Model Settings
-  validationModel: AgentModel; // Model used for GitHub issue validation (default: opus)
+  validationModel: ModelAlias; // Model used for GitHub issue validation (default: opus)
+
+  // Phase Model Settings - per-phase AI model configuration
+  phaseModels: PhaseModelConfig;
+  favoriteModels: string[];
+
+  // Cursor CLI Settings (global)
+  enabledCursorModels: CursorModelId[]; // Which Cursor models are available in feature modal
+  cursorDefaultModel: CursorModelId; // Default Cursor model selection
+
+  // Codex CLI Settings (global)
+  enabledCodexModels: CodexModelId[]; // Which Codex models are available in feature modal
+  codexDefaultModel: CodexModelId; // Default Codex model selection
+  codexAutoLoadAgents: boolean; // Auto-load .codex/AGENTS.md files
+  codexSandboxMode: 'read-only' | 'workspace-write' | 'danger-full-access'; // Sandbox policy
+  codexApprovalPolicy: 'untrusted' | 'on-failure' | 'on-request' | 'never'; // Approval policy
+  codexEnableWebSearch: boolean; // Enable web search capability
+  codexEnableImages: boolean; // Enable image processing
+
+  // OpenCode CLI Settings (global)
+  // Static OpenCode settings are persisted via SETTINGS_FIELDS_TO_SYNC
+  enabledOpencodeModels: OpencodeModelId[]; // Which static OpenCode models are available
+  opencodeDefaultModel: OpencodeModelId; // Default OpenCode model selection
+  // Dynamic models are session-only (not persisted) because they're discovered at runtime
+  // from `opencode models` CLI and depend on current provider authentication state
+  dynamicOpencodeModels: ModelDefinition[]; // Dynamically discovered models from OpenCode CLI
+  enabledDynamicModelIds: string[]; // Which dynamic models are enabled
+  cachedOpencodeProviders: Array<{
+    id: string;
+    name: string;
+    authenticated: boolean;
+    authMethod?: string;
+  }>; // Cached providers
+  opencodeModelsLoading: boolean; // Whether OpenCode models are being fetched
+  opencodeModelsError: string | null; // Error message if fetch failed
+  opencodeModelsLastFetched: number | null; // Timestamp of last successful fetch
+  opencodeModelsLastFailedAt: number | null; // Timestamp of last failed fetch
 
   // Claude Agent SDK Settings
   autoLoadClaudeMd: boolean; // Auto-load CLAUDE.md files using SDK's settingSources option
-  enableSandboxMode: boolean; // Enable sandbox mode for bash commands (may cause issues on some systems)
+  skipSandboxWarning: boolean; // Skip the sandbox environment warning dialog on startup
+
+  // MCP Servers
+  mcpServers: MCPServerConfig[]; // List of configured MCP servers for agent use
+
+  // Editor Configuration
+  defaultEditorCommand: string | null; // Default editor for "Open In" action
+
+  // Skills Configuration
+  enableSkills: boolean; // Enable Skills functionality (loads from .claude/skills/ directories)
+  skillsSources: Array<'user' | 'project'>; // Which directories to load Skills from
+
+  // Subagents Configuration
+  enableSubagents: boolean; // Enable Custom Subagents functionality (loads from .claude/agents/ directories)
+  subagentsSources: Array<'user' | 'project'>; // Which directories to load Subagents from
+
+  // Prompt Customization
+  promptCustomization: PromptCustomization; // Custom prompts for Auto Mode, Agent, Backlog Plan, Enhancement
 
   // Project Analysis
   projectAnalysis: ProjectAnalysis | null;
@@ -522,7 +663,7 @@ export interface AppState {
 
   defaultPlanningMode: PlanningMode;
   defaultRequirePlanApproval: boolean;
-  defaultAIProfileId: string | null;
+  defaultFeatureModel: PhaseModelEntry;
 
   // Plan Approval State
   // When a plan requires user approval, this holds the pending approval details
@@ -538,8 +679,54 @@ export interface AppState {
   claudeUsage: ClaudeUsage | null;
   claudeUsageLastUpdated: number | null;
 
+  // Codex Usage Tracking
+  codexUsage: CodexUsage | null;
+  codexUsageLastUpdated: number | null;
+
+  // Codex Models (dynamically fetched)
+  codexModels: Array<{
+    id: string;
+    label: string;
+    description: string;
+    hasThinking: boolean;
+    supportsVision: boolean;
+    tier: 'premium' | 'standard' | 'basic';
+    isDefault: boolean;
+  }>;
+  codexModelsLoading: boolean;
+  codexModelsError: string | null;
+  codexModelsLastFetched: number | null;
+  codexModelsLastFailedAt: number | null;
+
   // Pipeline Configuration (per-project, keyed by project path)
   pipelineConfigByProject: Record<string, PipelineConfig>;
+
+  // Worktree Panel Visibility (per-project, keyed by project path)
+  // Whether the worktree panel row is visible (default: true)
+  worktreePanelVisibleByProject: Record<string, boolean>;
+
+  // Init Script Indicator Visibility (per-project, keyed by project path)
+  // Whether to show the floating init script indicator panel (default: true)
+  showInitScriptIndicatorByProject: Record<string, boolean>;
+
+  // Default Delete Branch With Worktree (per-project, keyed by project path)
+  // Whether to default the "delete branch" checkbox when deleting a worktree (default: false)
+  defaultDeleteBranchByProject: Record<string, boolean>;
+
+  // Auto-dismiss Init Script Indicator (per-project, keyed by project path)
+  // Whether to auto-dismiss the indicator after completion (default: true)
+  autoDismissInitScriptIndicatorByProject: Record<string, boolean>;
+
+  // UI State (previously in localStorage, now synced via API)
+  /** Whether worktree panel is collapsed in board view */
+  worktreePanelCollapsed: boolean;
+  /** Last directory opened in file picker */
+  lastProjectDir: string;
+  /** Recently accessed folders for quick access */
+  recentFolders: string[];
+
+  // Init Script State (keyed by "projectPath::branch" to support concurrent scripts)
+  initScriptState: Record<string, InitScriptState>;
 }
 
 // Claude Usage interface matching the server response
@@ -570,6 +757,38 @@ export type ClaudeUsage = {
 
 // Response type for Claude usage API (can be success or error)
 export type ClaudeUsageResponse = ClaudeUsage | { error: string; message?: string };
+
+// Codex Usage types
+export type CodexPlanType =
+  | 'free'
+  | 'plus'
+  | 'pro'
+  | 'team'
+  | 'business'
+  | 'enterprise'
+  | 'edu'
+  | 'unknown';
+
+export interface CodexRateLimitWindow {
+  limit: number;
+  used: number;
+  remaining: number;
+  usedPercent: number; // Percentage used (0-100)
+  windowDurationMins: number; // Duration in minutes
+  resetsAt: number; // Unix timestamp in seconds
+}
+
+export interface CodexUsage {
+  rateLimits: {
+    primary?: CodexRateLimitWindow;
+    secondary?: CodexRateLimitWindow;
+    planType?: CodexPlanType;
+  } | null;
+  lastUpdated: string;
+}
+
+// Response type for Codex usage API (can be success or error)
+export type CodexUsageResponse = CodexUsage | { error: string; message?: string };
 
 /**
  * Check if Claude usage is at its limit (any of: session >= 100%, weekly >= 100%, OR cost >= limit)
@@ -661,6 +880,10 @@ export interface AppActions {
   cyclePrevProject: () => void; // Cycle back through project history (Q)
   cycleNextProject: () => void; // Cycle forward through project history (E)
   clearProjectHistory: () => void; // Clear history, keeping only current project
+  toggleProjectFavorite: (projectId: string) => void; // Toggle project favorite status
+  setProjectIcon: (projectId: string, icon: string | null) => void; // Set project icon (null to clear)
+  setProjectCustomIcon: (projectId: string, customIconPath: string | null) => void; // Set custom project icon image path (null to clear)
+  setProjectName: (projectId: string, name: string) => void; // Update project name
 
   // View actions
   setCurrentView: (view: ViewMode) => void;
@@ -714,12 +937,15 @@ export interface AppActions {
   setMaxConcurrency: (max: number) => void;
 
   // Kanban Card Settings actions
-  setKanbanCardDetailLevel: (level: KanbanCardDetailLevel) => void;
   setBoardViewMode: (mode: BoardViewMode) => void;
 
   // Feature Default Settings actions
   setDefaultSkipTests: (skip: boolean) => void;
   setEnableDependencyBlocking: (enabled: boolean) => void;
+  setSkipVerificationInAutoMode: (enabled: boolean) => Promise<void>;
+  setEnableAiCommitMessages: (enabled: boolean) => Promise<void>;
+  setPlanUseSelectedWorktreeBranch: (enabled: boolean) => Promise<void>;
+  setAddFeatureUseSelectedWorktreeBranch: (enabled: boolean) => Promise<void>;
 
   // Worktree Settings actions
   setUseWorktrees: (enabled: boolean) => void;
@@ -745,9 +971,6 @@ export interface AppActions {
   isPrimaryWorktreeBranch: (projectPath: string, branchName: string) => boolean;
   getPrimaryWorktreeBranch: (projectPath: string) => string | null;
 
-  // Profile Display Settings actions
-  setShowProfilesOnly: (enabled: boolean) => void;
-
   // Keyboard Shortcuts actions
   setKeyboardShortcut: (key: keyof KeyboardShortcuts, value: string) => void;
   setKeyboardShortcuts: (shortcuts: Partial<KeyboardShortcuts>) => void;
@@ -757,21 +980,62 @@ export interface AppActions {
   setMuteDoneSound: (muted: boolean) => void;
 
   // Enhancement Model actions
-  setEnhancementModel: (model: AgentModel) => void;
+  setEnhancementModel: (model: ModelAlias) => void;
 
   // Validation Model actions
-  setValidationModel: (model: AgentModel) => void;
+  setValidationModel: (model: ModelAlias) => void;
+
+  // Phase Model actions
+  setPhaseModel: (phase: PhaseModelKey, entry: PhaseModelEntry) => Promise<void>;
+  setPhaseModels: (models: Partial<PhaseModelConfig>) => Promise<void>;
+  resetPhaseModels: () => Promise<void>;
+  toggleFavoriteModel: (modelId: string) => void;
+
+  // Cursor CLI Settings actions
+  setEnabledCursorModels: (models: CursorModelId[]) => void;
+  setCursorDefaultModel: (model: CursorModelId) => void;
+  toggleCursorModel: (model: CursorModelId, enabled: boolean) => void;
+
+  // Codex CLI Settings actions
+  setEnabledCodexModels: (models: CodexModelId[]) => void;
+  setCodexDefaultModel: (model: CodexModelId) => void;
+  toggleCodexModel: (model: CodexModelId, enabled: boolean) => void;
+  setCodexAutoLoadAgents: (enabled: boolean) => Promise<void>;
+  setCodexSandboxMode: (
+    mode: 'read-only' | 'workspace-write' | 'danger-full-access'
+  ) => Promise<void>;
+  setCodexApprovalPolicy: (
+    policy: 'untrusted' | 'on-failure' | 'on-request' | 'never'
+  ) => Promise<void>;
+  setCodexEnableWebSearch: (enabled: boolean) => Promise<void>;
+  setCodexEnableImages: (enabled: boolean) => Promise<void>;
+
+  // OpenCode CLI Settings actions
+  setEnabledOpencodeModels: (models: OpencodeModelId[]) => void;
+  setOpencodeDefaultModel: (model: OpencodeModelId) => void;
+  toggleOpencodeModel: (model: OpencodeModelId, enabled: boolean) => void;
+  setDynamicOpencodeModels: (models: ModelDefinition[]) => void;
+  setEnabledDynamicModelIds: (ids: string[]) => void;
+  toggleDynamicModel: (modelId: string, enabled: boolean) => void;
+  setCachedOpencodeProviders: (
+    providers: Array<{ id: string; name: string; authenticated: boolean; authMethod?: string }>
+  ) => void;
 
   // Claude Agent SDK Settings actions
   setAutoLoadClaudeMd: (enabled: boolean) => Promise<void>;
-  setEnableSandboxMode: (enabled: boolean) => Promise<void>;
+  setSkipSandboxWarning: (skip: boolean) => Promise<void>;
 
-  // AI Profile actions
-  addAIProfile: (profile: Omit<AIProfile, 'id'>) => void;
-  updateAIProfile: (id: string, updates: Partial<AIProfile>) => void;
-  removeAIProfile: (id: string) => void;
-  reorderAIProfiles: (oldIndex: number, newIndex: number) => void;
-  resetAIProfiles: () => void;
+  // Editor Configuration actions
+  setDefaultEditorCommand: (command: string | null) => void;
+
+  // Prompt Customization actions
+  setPromptCustomization: (customization: PromptCustomization) => Promise<void>;
+
+  // MCP Server actions
+  addMCPServer: (server: Omit<MCPServerConfig, 'id'>) => void;
+  updateMCPServer: (id: string, updates: Partial<MCPServerConfig>) => void;
+  removeMCPServer: (id: string) => void;
+  reorderMCPServers: (oldIndex: number, newIndex: number) => void;
 
   // Project Analysis actions
   setProjectAnalysis: (analysis: ProjectAnalysis | null) => void;
@@ -851,7 +1115,7 @@ export interface AppActions {
 
   setDefaultPlanningMode: (mode: PlanningMode) => void;
   setDefaultRequirePlanApproval: (require: boolean) => void;
-  setDefaultAIProfileId: (profileId: string | null) => void;
+  setDefaultFeatureModel: (entry: PhaseModelEntry) => void;
 
   // Plan Approval actions
   setPendingPlanApproval: (
@@ -878,44 +1142,69 @@ export interface AppActions {
   deletePipelineStep: (projectPath: string, stepId: string) => void;
   reorderPipelineSteps: (projectPath: string, stepIds: string[]) => void;
 
+  // Worktree Panel Visibility actions (per-project)
+  setWorktreePanelVisible: (projectPath: string, visible: boolean) => void;
+  getWorktreePanelVisible: (projectPath: string) => boolean;
+
+  // Init Script Indicator Visibility actions (per-project)
+  setShowInitScriptIndicator: (projectPath: string, visible: boolean) => void;
+  getShowInitScriptIndicator: (projectPath: string) => boolean;
+
+  // Default Delete Branch actions (per-project)
+  setDefaultDeleteBranch: (projectPath: string, deleteBranch: boolean) => void;
+  getDefaultDeleteBranch: (projectPath: string) => boolean;
+
+  // Auto-dismiss Init Script Indicator actions (per-project)
+  setAutoDismissInitScriptIndicator: (projectPath: string, autoDismiss: boolean) => void;
+  getAutoDismissInitScriptIndicator: (projectPath: string) => boolean;
+
+  // UI State actions (previously in localStorage, now synced via API)
+  setWorktreePanelCollapsed: (collapsed: boolean) => void;
+  setLastProjectDir: (dir: string) => void;
+  setRecentFolders: (folders: string[]) => void;
+  addRecentFolder: (folder: string) => void;
+
+  // Claude Usage Tracking actions
+  setClaudeRefreshInterval: (interval: number) => void;
+  setClaudeUsageLastUpdated: (timestamp: number) => void;
+  setClaudeUsage: (usage: ClaudeUsage | null) => void;
+
+  // Codex Usage Tracking actions
+  setCodexUsage: (usage: CodexUsage | null) => void;
+
+  // Codex Models actions
+  fetchCodexModels: (forceRefresh?: boolean) => Promise<void>;
+  setCodexModels: (
+    models: Array<{
+      id: string;
+      label: string;
+      description: string;
+      hasThinking: boolean;
+      supportsVision: boolean;
+      tier: 'premium' | 'standard' | 'basic';
+      isDefault: boolean;
+    }>
+  ) => void;
+
+  // OpenCode Models actions
+  fetchOpencodeModels: (forceRefresh?: boolean) => Promise<void>;
+
+  // Init Script State actions (keyed by projectPath::branch to support concurrent scripts)
+  setInitScriptState: (
+    projectPath: string,
+    branch: string,
+    state: Partial<InitScriptState>
+  ) => void;
+  appendInitScriptOutput: (projectPath: string, branch: string, content: string) => void;
+  clearInitScriptState: (projectPath: string, branch: string) => void;
+  getInitScriptState: (projectPath: string, branch: string) => InitScriptState | null;
+  getInitScriptStatesForProject: (
+    projectPath: string
+  ) => Array<{ key: string; state: InitScriptState }>;
+
   // Reset
   reset: () => void;
 }
-
-// Default built-in AI profiles
-const DEFAULT_AI_PROFILES: AIProfile[] = [
-  {
-    id: 'profile-heavy-task',
-    name: 'Heavy Task',
-    description:
-      'Claude Opus with Ultrathink for complex architecture, migrations, or deep debugging.',
-    model: 'opus',
-    thinkingLevel: 'ultrathink',
-    provider: 'claude',
-    isBuiltIn: true,
-    icon: 'Brain',
-  },
-  {
-    id: 'profile-balanced',
-    name: 'Balanced',
-    description: 'Claude Sonnet with medium thinking for typical development tasks.',
-    model: 'sonnet',
-    thinkingLevel: 'medium',
-    provider: 'claude',
-    isBuiltIn: true,
-    icon: 'Scale',
-  },
-  {
-    id: 'profile-quick-edit',
-    name: 'Quick Edit',
-    description: 'Claude Haiku for fast, simple edits and minor fixes.',
-    model: 'haiku',
-    thinkingLevel: 'none',
-    provider: 'claude',
-    isBuiltIn: true,
-    icon: 'Zap',
-  },
-];
 
 const initialState: AppState = {
   projects: [],
@@ -926,7 +1215,7 @@ const initialState: AppState = {
   currentView: 'welcome',
   sidebarOpen: true,
   lastSelectedSessionByProject: {},
-  theme: 'dark',
+  theme: getStoredTheme() || 'dark', // Use localStorage theme as initial value, fallback to 'dark'
   features: [],
   appSpec: '',
   ipcConnected: false,
@@ -941,21 +1230,49 @@ const initialState: AppState = {
   autoModeByProject: {},
   autoModeActivityLog: [],
   maxConcurrency: 3, // Default to 3 concurrent agents
-  kanbanCardDetailLevel: 'standard', // Default to standard detail level
   boardViewMode: 'kanban', // Default to kanban view
   defaultSkipTests: true, // Default to manual verification (tests disabled)
   enableDependencyBlocking: true, // Default to enabled (show dependency blocking UI)
-  useWorktrees: false, // Default to disabled (worktree feature is experimental)
+  skipVerificationInAutoMode: false, // Default to disabled (require dependencies to be verified)
+  enableAiCommitMessages: true, // Default to enabled (auto-generate commit messages)
+  planUseSelectedWorktreeBranch: true, // Default to enabled (Plan creates features on selected worktree branch)
+  addFeatureUseSelectedWorktreeBranch: false, // Default to disabled (Add Feature uses normal defaults)
+  useWorktrees: true, // Default to enabled (git worktree isolation)
   currentWorktreeByProject: {},
   worktreesByProject: {},
-  showProfilesOnly: false, // Default to showing all options (not profiles only)
   keyboardShortcuts: DEFAULT_KEYBOARD_SHORTCUTS, // Default keyboard shortcuts
   muteDoneSound: false, // Default to sound enabled (not muted)
   enhancementModel: 'sonnet', // Default to sonnet for feature enhancement
   validationModel: 'opus', // Default to opus for GitHub issue validation
+  phaseModels: DEFAULT_PHASE_MODELS, // Phase-specific model configuration
+  favoriteModels: [],
+  enabledCursorModels: getAllCursorModelIds(), // All Cursor models enabled by default
+  cursorDefaultModel: 'auto', // Default to auto selection
+  enabledCodexModels: getAllCodexModelIds(), // All Codex models enabled by default
+  codexDefaultModel: 'codex-gpt-5.2-codex', // Default to GPT-5.2-Codex
+  codexAutoLoadAgents: false, // Default to disabled (user must opt-in)
+  codexSandboxMode: 'workspace-write', // Default to workspace-write for safety
+  codexApprovalPolicy: 'on-request', // Default to on-request for balanced safety
+  codexEnableWebSearch: false, // Default to disabled
+  codexEnableImages: false, // Default to disabled
+  enabledOpencodeModels: getAllOpencodeModelIds(), // All OpenCode models enabled by default
+  opencodeDefaultModel: DEFAULT_OPENCODE_MODEL, // Default to OpenCode free tier
+  dynamicOpencodeModels: [], // Empty until fetched from OpenCode CLI
+  enabledDynamicModelIds: [], // Empty until user enables dynamic models
+  cachedOpencodeProviders: [], // Empty until fetched from OpenCode CLI
+  opencodeModelsLoading: false,
+  opencodeModelsError: null,
+  opencodeModelsLastFetched: null,
+  opencodeModelsLastFailedAt: null,
   autoLoadClaudeMd: false, // Default to disabled (user must opt-in)
-  enableSandboxMode: true, // Default to enabled for security (can be disabled if issues occur)
-  aiProfiles: DEFAULT_AI_PROFILES,
+  skipSandboxWarning: false, // Default to disabled (show sandbox warning dialog)
+  mcpServers: [], // No MCP servers configured by default
+  defaultEditorCommand: null, // Auto-detect: Cursor > VS Code > first available
+  enableSkills: true, // Skills enabled by default
+  skillsSources: ['user', 'project'] as Array<'user' | 'project'>, // Load from both sources by default
+  enableSubagents: true, // Subagents enabled by default
+  subagentsSources: ['user', 'project'] as Array<'user' | 'project'>, // Load from both sources by default
+  promptCustomization: {}, // Empty by default - all prompts use built-in defaults
   projectAnalysis: null,
   isAnalyzing: false,
   boardBackgroundByProject: {},
@@ -980,1902 +1297,2258 @@ const initialState: AppState = {
   specCreatingForProject: null,
   defaultPlanningMode: 'skip' as PlanningMode,
   defaultRequirePlanApproval: false,
-  defaultAIProfileId: null,
+  defaultFeatureModel: { model: 'opus' } as PhaseModelEntry,
   pendingPlanApproval: null,
   claudeRefreshInterval: 60,
   claudeUsage: null,
   claudeUsageLastUpdated: null,
+  codexUsage: null,
+  codexUsageLastUpdated: null,
+  codexModels: [],
+  codexModelsLoading: false,
+  codexModelsError: null,
+  codexModelsLastFetched: null,
+  codexModelsLastFailedAt: null,
   pipelineConfigByProject: {},
+  worktreePanelVisibleByProject: {},
+  showInitScriptIndicatorByProject: {},
+  defaultDeleteBranchByProject: {},
+  autoDismissInitScriptIndicatorByProject: {},
+  // UI State (previously in localStorage, now synced via API)
+  worktreePanelCollapsed: false,
+  lastProjectDir: '',
+  recentFolders: [],
+  initScriptState: {},
 };
 
-export const useAppStore = create<AppState & AppActions>()(
-  persist(
-    (set, get) => ({
-      ...initialState,
+export const useAppStore = create<AppState & AppActions>()((set, get) => ({
+  ...initialState,
 
-      // Project actions
-      setProjects: (projects) => set({ projects }),
+  // Project actions
+  setProjects: (projects) => set({ projects }),
 
-      addProject: (project) => {
-        const projects = get().projects;
-        const existing = projects.findIndex((p) => p.path === project.path);
-        if (existing >= 0) {
-          const updated = [...projects];
-          updated[existing] = {
-            ...project,
-            lastOpened: new Date().toISOString(),
-          };
-          set({ projects: updated });
-        } else {
-          set({
-            projects: [...projects, { ...project, lastOpened: new Date().toISOString() }],
-          });
-        }
-      },
+  addProject: (project) => {
+    const projects = get().projects;
+    const existing = projects.findIndex((p) => p.path === project.path);
+    if (existing >= 0) {
+      const updated = [...projects];
+      updated[existing] = {
+        ...project,
+        lastOpened: new Date().toISOString(),
+      };
+      set({ projects: updated });
+    } else {
+      set({
+        projects: [...projects, { ...project, lastOpened: new Date().toISOString() }],
+      });
+    }
+  },
 
-      removeProject: (projectId) => {
-        set({ projects: get().projects.filter((p) => p.id !== projectId) });
-      },
+  removeProject: (projectId) => {
+    set({ projects: get().projects.filter((p) => p.id !== projectId) });
+  },
 
-      moveProjectToTrash: (projectId) => {
-        const project = get().projects.find((p) => p.id === projectId);
-        if (!project) return;
+  moveProjectToTrash: (projectId) => {
+    const project = get().projects.find((p) => p.id === projectId);
+    if (!project) return;
 
-        const remainingProjects = get().projects.filter((p) => p.id !== projectId);
-        const existingTrash = get().trashedProjects.filter((p) => p.id !== projectId);
-        const trashedProject: TrashedProject = {
-          ...project,
-          trashedAt: new Date().toISOString(),
-          deletedFromDisk: false,
-        };
+    const remainingProjects = get().projects.filter((p) => p.id !== projectId);
+    const existingTrash = get().trashedProjects.filter((p) => p.id !== projectId);
+    const trashedProject: TrashedProject = {
+      ...project,
+      trashedAt: new Date().toISOString(),
+      deletedFromDisk: false,
+    };
 
-        const isCurrent = get().currentProject?.id === projectId;
+    const isCurrent = get().currentProject?.id === projectId;
+    const nextCurrentProject = isCurrent ? null : get().currentProject;
 
+    set({
+      projects: remainingProjects,
+      trashedProjects: [trashedProject, ...existingTrash],
+      currentProject: nextCurrentProject,
+      currentView: isCurrent ? 'welcome' : get().currentView,
+    });
+
+    persistEffectiveThemeForProject(nextCurrentProject, get().theme);
+  },
+
+  restoreTrashedProject: (projectId) => {
+    const trashed = get().trashedProjects.find((p) => p.id === projectId);
+    if (!trashed) return;
+
+    const remainingTrash = get().trashedProjects.filter((p) => p.id !== projectId);
+    const existingProjects = get().projects;
+    const samePathProject = existingProjects.find((p) => p.path === trashed.path);
+    const projectsWithoutId = existingProjects.filter((p) => p.id !== projectId);
+
+    // If a project with the same path already exists, keep it and just remove from trash
+    if (samePathProject) {
+      set({
+        trashedProjects: remainingTrash,
+        currentProject: samePathProject,
+        currentView: 'board',
+      });
+      persistEffectiveThemeForProject(samePathProject, get().theme);
+      return;
+    }
+
+    const restoredProject: Project = {
+      id: trashed.id,
+      name: trashed.name,
+      path: trashed.path,
+      lastOpened: new Date().toISOString(),
+      theme: trashed.theme, // Preserve theme from trashed project
+    };
+
+    set({
+      trashedProjects: remainingTrash,
+      projects: [...projectsWithoutId, restoredProject],
+      currentProject: restoredProject,
+      currentView: 'board',
+    });
+    persistEffectiveThemeForProject(restoredProject, get().theme);
+  },
+
+  deleteTrashedProject: (projectId) => {
+    set({
+      trashedProjects: get().trashedProjects.filter((p) => p.id !== projectId),
+    });
+  },
+
+  emptyTrash: () => set({ trashedProjects: [] }),
+
+  reorderProjects: (oldIndex, newIndex) => {
+    const projects = [...get().projects];
+    const [movedProject] = projects.splice(oldIndex, 1);
+    projects.splice(newIndex, 0, movedProject);
+    set({ projects });
+  },
+
+  setCurrentProject: (project) => {
+    set({ currentProject: project });
+    persistEffectiveThemeForProject(project, get().theme);
+    if (project) {
+      set({ currentView: 'board' });
+      // Add to project history (MRU order)
+      const currentHistory = get().projectHistory;
+      // Remove this project if it's already in history
+      const filteredHistory = currentHistory.filter((id) => id !== project.id);
+      // Add to the front (most recent)
+      const newHistory = [project.id, ...filteredHistory];
+      // Reset history index to 0 (current project)
+      set({ projectHistory: newHistory, projectHistoryIndex: 0 });
+    } else {
+      set({ currentView: 'welcome' });
+    }
+  },
+
+  upsertAndSetCurrentProject: (path, name, theme) => {
+    const { projects, trashedProjects, currentProject, theme: globalTheme } = get();
+    const existingProject = projects.find((p) => p.path === path);
+    let project: Project;
+
+    if (existingProject) {
+      // Update existing project, preserving theme and other properties
+      project = {
+        ...existingProject,
+        name, // Update name in case it changed
+        lastOpened: new Date().toISOString(),
+      };
+      // Update the project in the store
+      const updatedProjects = projects.map((p) => (p.id === existingProject.id ? project : p));
+      set({ projects: updatedProjects });
+    } else {
+      // Create new project - check for trashed project with same path first (preserves theme if deleted/recreated)
+      // Then fall back to provided theme, then current project theme, then global theme
+      const trashedProject = trashedProjects.find((p) => p.path === path);
+      const effectiveTheme = theme || trashedProject?.theme || currentProject?.theme || globalTheme;
+      project = {
+        id: `project-${Date.now()}`,
+        name,
+        path,
+        lastOpened: new Date().toISOString(),
+        theme: effectiveTheme,
+      };
+      // Add the new project to the store
+      set({
+        projects: [...projects, { ...project, lastOpened: new Date().toISOString() }],
+      });
+    }
+
+    // Set as current project (this will also update history and view)
+    get().setCurrentProject(project);
+    return project;
+  },
+
+  cyclePrevProject: () => {
+    const { projectHistory, projectHistoryIndex, projects } = get();
+
+    // Filter history to only include valid projects
+    const validHistory = projectHistory.filter((id) => projects.some((p) => p.id === id));
+
+    if (validHistory.length <= 1) return; // Need at least 2 valid projects to cycle
+
+    // Find current position in valid history
+    const currentProjectId = get().currentProject?.id;
+    let currentIndex = currentProjectId
+      ? validHistory.indexOf(currentProjectId)
+      : projectHistoryIndex;
+
+    // If current project not found in valid history, start from 0
+    if (currentIndex === -1) currentIndex = 0;
+
+    // Move to the next index (going back in history = higher index), wrapping around
+    const newIndex = (currentIndex + 1) % validHistory.length;
+    const targetProjectId = validHistory[newIndex];
+    const targetProject = projects.find((p) => p.id === targetProjectId);
+
+    if (targetProject) {
+      // Update history to only include valid projects and set new index
+      set({
+        currentProject: targetProject,
+        projectHistory: validHistory,
+        projectHistoryIndex: newIndex,
+        currentView: 'board',
+      });
+      persistEffectiveThemeForProject(targetProject, get().theme);
+    }
+  },
+
+  cycleNextProject: () => {
+    const { projectHistory, projectHistoryIndex, projects } = get();
+
+    // Filter history to only include valid projects
+    const validHistory = projectHistory.filter((id) => projects.some((p) => p.id === id));
+
+    if (validHistory.length <= 1) return; // Need at least 2 valid projects to cycle
+
+    // Find current position in valid history
+    const currentProjectId = get().currentProject?.id;
+    let currentIndex = currentProjectId
+      ? validHistory.indexOf(currentProjectId)
+      : projectHistoryIndex;
+
+    // If current project not found in valid history, start from 0
+    if (currentIndex === -1) currentIndex = 0;
+
+    // Move to the previous index (going forward = lower index), wrapping around
+    const newIndex = currentIndex <= 0 ? validHistory.length - 1 : currentIndex - 1;
+    const targetProjectId = validHistory[newIndex];
+    const targetProject = projects.find((p) => p.id === targetProjectId);
+
+    if (targetProject) {
+      // Update history to only include valid projects and set new index
+      set({
+        currentProject: targetProject,
+        projectHistory: validHistory,
+        projectHistoryIndex: newIndex,
+        currentView: 'board',
+      });
+      persistEffectiveThemeForProject(targetProject, get().theme);
+    }
+  },
+
+  clearProjectHistory: () => {
+    const currentProject = get().currentProject;
+    if (currentProject) {
+      // Keep only the current project in history
+      set({
+        projectHistory: [currentProject.id],
+        projectHistoryIndex: 0,
+      });
+    } else {
+      // No current project, clear everything
+      set({
+        projectHistory: [],
+        projectHistoryIndex: -1,
+      });
+    }
+  },
+
+  toggleProjectFavorite: (projectId) => {
+    const { projects, currentProject } = get();
+    const updatedProjects = projects.map((p) =>
+      p.id === projectId ? { ...p, isFavorite: !p.isFavorite } : p
+    );
+    set({ projects: updatedProjects });
+    // Also update currentProject if it matches
+    if (currentProject?.id === projectId) {
+      set({
+        currentProject: {
+          ...currentProject,
+          isFavorite: !currentProject.isFavorite,
+        },
+      });
+    }
+  },
+
+  setProjectIcon: (projectId, icon) => {
+    const { projects, currentProject } = get();
+    const updatedProjects = projects.map((p) =>
+      p.id === projectId ? { ...p, icon: icon === null ? undefined : icon } : p
+    );
+    set({ projects: updatedProjects });
+    // Also update currentProject if it matches
+    if (currentProject?.id === projectId) {
+      set({
+        currentProject: {
+          ...currentProject,
+          icon: icon === null ? undefined : icon,
+        },
+      });
+    }
+  },
+
+  setProjectCustomIcon: (projectId, customIconPath) => {
+    const { projects, currentProject } = get();
+    const updatedProjects = projects.map((p) =>
+      p.id === projectId
+        ? { ...p, customIconPath: customIconPath === null ? undefined : customIconPath }
+        : p
+    );
+    set({ projects: updatedProjects });
+    // Also update currentProject if it matches
+    if (currentProject?.id === projectId) {
+      set({
+        currentProject: {
+          ...currentProject,
+          customIconPath: customIconPath === null ? undefined : customIconPath,
+        },
+      });
+    }
+  },
+
+  setProjectName: (projectId, name) => {
+    const { projects, currentProject } = get();
+    const updatedProjects = projects.map((p) => (p.id === projectId ? { ...p, name } : p));
+    set({ projects: updatedProjects });
+    // Also update currentProject if it matches
+    if (currentProject?.id === projectId) {
+      set({
+        currentProject: {
+          ...currentProject,
+          name,
+        },
+      });
+    }
+  },
+
+  // View actions
+  setCurrentView: (view) => set({ currentView: view }),
+  toggleSidebar: () => set({ sidebarOpen: !get().sidebarOpen }),
+  setSidebarOpen: (open) => set({ sidebarOpen: open }),
+
+  // Theme actions
+  setTheme: (theme) => {
+    // Save to localStorage for fallback when server settings aren't available
+    saveThemeToStorage(theme);
+    set({ theme });
+  },
+
+  setProjectTheme: (projectId, theme) => {
+    // Update the project's theme property
+    const projects = get().projects.map((p) =>
+      p.id === projectId ? { ...p, theme: theme === null ? undefined : theme } : p
+    );
+    set({ projects });
+
+    // Also update currentProject if it's the same project
+    const currentProject = get().currentProject;
+    if (currentProject?.id === projectId) {
+      const updatedTheme = theme === null ? undefined : theme;
+      set({
+        currentProject: {
+          ...currentProject,
+          theme: updatedTheme,
+        },
+      });
+      persistEffectiveThemeForProject({ ...currentProject, theme: updatedTheme }, get().theme);
+    }
+  },
+
+  getEffectiveTheme: () => {
+    // If preview theme is set, use it (for hover preview)
+    const previewTheme = get().previewTheme;
+    if (previewTheme) {
+      return previewTheme;
+    }
+    const currentProject = get().currentProject;
+    // If current project has a theme set, use it
+    if (currentProject?.theme) {
+      return currentProject.theme as ThemeMode;
+    }
+    // Otherwise fall back to global theme
+    return get().theme;
+  },
+
+  setPreviewTheme: (theme) => set({ previewTheme: theme }),
+
+  // Feature actions
+  setFeatures: (features) => set({ features }),
+
+  updateFeature: (id, updates) => {
+    set({
+      features: get().features.map((f) => (f.id === id ? { ...f, ...updates } : f)),
+    });
+  },
+
+  addFeature: (feature) => {
+    const id = feature.id || `feature-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const featureWithId = { ...feature, id } as unknown as Feature;
+    set({ features: [...get().features, featureWithId] });
+    return featureWithId;
+  },
+
+  removeFeature: (id) => {
+    set({ features: get().features.filter((f) => f.id !== id) });
+  },
+
+  moveFeature: (id, newStatus) => {
+    set({
+      features: get().features.map((f) => (f.id === id ? { ...f, status: newStatus } : f)),
+    });
+  },
+
+  // App spec actions
+  setAppSpec: (spec) => set({ appSpec: spec }),
+
+  // IPC actions
+  setIpcConnected: (connected) => set({ ipcConnected: connected }),
+
+  // API Keys actions
+  setApiKeys: (keys) => set({ apiKeys: { ...get().apiKeys, ...keys } }),
+
+  // Chat Session actions
+  createChatSession: (title) => {
+    const currentProject = get().currentProject;
+    if (!currentProject) {
+      throw new Error('No project selected');
+    }
+
+    const now = new Date();
+    const session: ChatSession = {
+      id: `chat-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      title: title || `Chat ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
+      projectId: currentProject.id,
+      messages: [
+        {
+          id: 'welcome',
+          role: 'assistant',
+          content:
+            "Hello! I'm the Automaker Agent. I can help you build software autonomously. What would you like to create today?",
+          timestamp: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+      archived: false,
+    };
+
+    set({
+      chatSessions: [...get().chatSessions, session],
+      currentChatSession: session,
+    });
+
+    return session;
+  },
+
+  updateChatSession: (sessionId, updates) => {
+    set({
+      chatSessions: get().chatSessions.map((session) =>
+        session.id === sessionId ? { ...session, ...updates, updatedAt: new Date() } : session
+      ),
+    });
+
+    // Update current session if it's the one being updated
+    const currentSession = get().currentChatSession;
+    if (currentSession && currentSession.id === sessionId) {
+      set({
+        currentChatSession: {
+          ...currentSession,
+          ...updates,
+          updatedAt: new Date(),
+        },
+      });
+    }
+  },
+
+  addMessageToSession: (sessionId, message) => {
+    const sessions = get().chatSessions;
+    const sessionIndex = sessions.findIndex((s) => s.id === sessionId);
+
+    if (sessionIndex >= 0) {
+      const updatedSessions = [...sessions];
+      updatedSessions[sessionIndex] = {
+        ...updatedSessions[sessionIndex],
+        messages: [...updatedSessions[sessionIndex].messages, message],
+        updatedAt: new Date(),
+      };
+
+      set({ chatSessions: updatedSessions });
+
+      // Update current session if it's the one being updated
+      const currentSession = get().currentChatSession;
+      if (currentSession && currentSession.id === sessionId) {
         set({
-          projects: remainingProjects,
-          trashedProjects: [trashedProject, ...existingTrash],
-          currentProject: isCurrent ? null : get().currentProject,
-          currentView: isCurrent ? 'welcome' : get().currentView,
+          currentChatSession: updatedSessions[sessionIndex],
         });
+      }
+    }
+  },
+
+  setCurrentChatSession: (session) => {
+    set({ currentChatSession: session });
+  },
+
+  archiveChatSession: (sessionId) => {
+    get().updateChatSession(sessionId, { archived: true });
+  },
+
+  unarchiveChatSession: (sessionId) => {
+    get().updateChatSession(sessionId, { archived: false });
+  },
+
+  deleteChatSession: (sessionId) => {
+    const currentSession = get().currentChatSession;
+    set({
+      chatSessions: get().chatSessions.filter((s) => s.id !== sessionId),
+      currentChatSession: currentSession?.id === sessionId ? null : currentSession,
+    });
+  },
+
+  setChatHistoryOpen: (open) => set({ chatHistoryOpen: open }),
+
+  toggleChatHistory: () => set({ chatHistoryOpen: !get().chatHistoryOpen }),
+
+  // Auto Mode actions (per-project)
+  setAutoModeRunning: (projectId, running) => {
+    const current = get().autoModeByProject;
+    const projectState = current[projectId] || {
+      isRunning: false,
+      runningTasks: [],
+    };
+    set({
+      autoModeByProject: {
+        ...current,
+        [projectId]: { ...projectState, isRunning: running },
       },
+    });
+  },
 
-      restoreTrashedProject: (projectId) => {
-        const trashed = get().trashedProjects.find((p) => p.id === projectId);
-        if (!trashed) return;
+  addRunningTask: (projectId, taskId) => {
+    const current = get().autoModeByProject;
+    const projectState = current[projectId] || {
+      isRunning: false,
+      runningTasks: [],
+    };
+    if (!projectState.runningTasks.includes(taskId)) {
+      set({
+        autoModeByProject: {
+          ...current,
+          [projectId]: {
+            ...projectState,
+            runningTasks: [...projectState.runningTasks, taskId],
+          },
+        },
+      });
+    }
+  },
 
-        const remainingTrash = get().trashedProjects.filter((p) => p.id !== projectId);
-        const existingProjects = get().projects;
-        const samePathProject = existingProjects.find((p) => p.path === trashed.path);
-        const projectsWithoutId = existingProjects.filter((p) => p.id !== projectId);
-
-        // If a project with the same path already exists, keep it and just remove from trash
-        if (samePathProject) {
-          set({
-            trashedProjects: remainingTrash,
-            currentProject: samePathProject,
-            currentView: 'board',
-          });
-          return;
-        }
-
-        const restoredProject: Project = {
-          id: trashed.id,
-          name: trashed.name,
-          path: trashed.path,
-          lastOpened: new Date().toISOString(),
-          theme: trashed.theme, // Preserve theme from trashed project
-        };
-
-        set({
-          trashedProjects: remainingTrash,
-          projects: [...projectsWithoutId, restoredProject],
-          currentProject: restoredProject,
-          currentView: 'board',
-        });
+  removeRunningTask: (projectId, taskId) => {
+    const current = get().autoModeByProject;
+    const projectState = current[projectId] || {
+      isRunning: false,
+      runningTasks: [],
+    };
+    set({
+      autoModeByProject: {
+        ...current,
+        [projectId]: {
+          ...projectState,
+          runningTasks: projectState.runningTasks.filter((id) => id !== taskId),
+        },
       },
+    });
+  },
 
-      deleteTrashedProject: (projectId) => {
-        set({
-          trashedProjects: get().trashedProjects.filter((p) => p.id !== projectId),
-        });
+  clearRunningTasks: (projectId) => {
+    const current = get().autoModeByProject;
+    const projectState = current[projectId] || {
+      isRunning: false,
+      runningTasks: [],
+    };
+    set({
+      autoModeByProject: {
+        ...current,
+        [projectId]: { ...projectState, runningTasks: [] },
       },
+    });
+  },
 
-      emptyTrash: () => set({ trashedProjects: [] }),
+  getAutoModeState: (projectId) => {
+    const projectState = get().autoModeByProject[projectId];
+    return projectState || { isRunning: false, runningTasks: [] };
+  },
 
-      reorderProjects: (oldIndex, newIndex) => {
-        const projects = [...get().projects];
-        const [movedProject] = projects.splice(oldIndex, 1);
-        projects.splice(newIndex, 0, movedProject);
-        set({ projects });
+  addAutoModeActivity: (activity) => {
+    const id = `activity-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const newActivity: AutoModeActivity = {
+      ...activity,
+      id,
+      timestamp: new Date(),
+    };
+
+    // Keep only the last 100 activities to avoid memory issues
+    const currentLog = get().autoModeActivityLog;
+    const updatedLog = [...currentLog, newActivity].slice(-100);
+
+    set({ autoModeActivityLog: updatedLog });
+  },
+
+  clearAutoModeActivity: () => set({ autoModeActivityLog: [] }),
+
+  setMaxConcurrency: (max) => set({ maxConcurrency: max }),
+
+  // Kanban Card Settings actions
+  setBoardViewMode: (mode) => set({ boardViewMode: mode }),
+
+  // Feature Default Settings actions
+  setDefaultSkipTests: (skip) => set({ defaultSkipTests: skip }),
+  setEnableDependencyBlocking: (enabled) => set({ enableDependencyBlocking: enabled }),
+  setSkipVerificationInAutoMode: async (enabled) => {
+    set({ skipVerificationInAutoMode: enabled });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  setEnableAiCommitMessages: async (enabled) => {
+    const previous = get().enableAiCommitMessages;
+    set({ enableAiCommitMessages: enabled });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    const ok = await syncSettingsToServer();
+    if (!ok) {
+      logger.error('Failed to sync enableAiCommitMessages setting to server - reverting');
+      set({ enableAiCommitMessages: previous });
+    }
+  },
+  setPlanUseSelectedWorktreeBranch: async (enabled) => {
+    const previous = get().planUseSelectedWorktreeBranch;
+    set({ planUseSelectedWorktreeBranch: enabled });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    const ok = await syncSettingsToServer();
+    if (!ok) {
+      logger.error('Failed to sync planUseSelectedWorktreeBranch setting to server - reverting');
+      set({ planUseSelectedWorktreeBranch: previous });
+    }
+  },
+  setAddFeatureUseSelectedWorktreeBranch: async (enabled) => {
+    const previous = get().addFeatureUseSelectedWorktreeBranch;
+    set({ addFeatureUseSelectedWorktreeBranch: enabled });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    const ok = await syncSettingsToServer();
+    if (!ok) {
+      logger.error(
+        'Failed to sync addFeatureUseSelectedWorktreeBranch setting to server - reverting'
+      );
+      set({ addFeatureUseSelectedWorktreeBranch: previous });
+    }
+  },
+
+  // Worktree Settings actions
+  setUseWorktrees: (enabled) => set({ useWorktrees: enabled }),
+
+  setCurrentWorktree: (projectPath, worktreePath, branch) => {
+    const current = get().currentWorktreeByProject;
+    set({
+      currentWorktreeByProject: {
+        ...current,
+        [projectPath]: { path: worktreePath, branch },
       },
+    });
+  },
 
-      setCurrentProject: (project) => {
-        set({ currentProject: project });
-        if (project) {
-          set({ currentView: 'board' });
-          // Add to project history (MRU order)
-          const currentHistory = get().projectHistory;
-          // Remove this project if it's already in history
-          const filteredHistory = currentHistory.filter((id) => id !== project.id);
-          // Add to the front (most recent)
-          const newHistory = [project.id, ...filteredHistory];
-          // Reset history index to 0 (current project)
-          set({ projectHistory: newHistory, projectHistoryIndex: 0 });
-        } else {
-          set({ currentView: 'welcome' });
-        }
+  setWorktrees: (projectPath, worktrees) => {
+    const current = get().worktreesByProject;
+    set({
+      worktreesByProject: {
+        ...current,
+        [projectPath]: worktrees,
       },
+    });
+  },
 
-      upsertAndSetCurrentProject: (path, name, theme) => {
-        const { projects, trashedProjects, currentProject, theme: globalTheme } = get();
-        const existingProject = projects.find((p) => p.path === path);
-        let project: Project;
+  getCurrentWorktree: (projectPath) => {
+    return get().currentWorktreeByProject[projectPath] ?? null;
+  },
 
-        if (existingProject) {
-          // Update existing project, preserving theme and other properties
-          project = {
-            ...existingProject,
-            name, // Update name in case it changed
-            lastOpened: new Date().toISOString(),
-          };
-          // Update the project in the store
-          const updatedProjects = projects.map((p) => (p.id === existingProject.id ? project : p));
-          set({ projects: updatedProjects });
-        } else {
-          // Create new project - check for trashed project with same path first (preserves theme if deleted/recreated)
-          // Then fall back to provided theme, then current project theme, then global theme
-          const trashedProject = trashedProjects.find((p) => p.path === path);
-          const effectiveTheme =
-            theme || trashedProject?.theme || currentProject?.theme || globalTheme;
-          project = {
-            id: `project-${Date.now()}`,
-            name,
-            path,
-            lastOpened: new Date().toISOString(),
-            theme: effectiveTheme,
-          };
-          // Add the new project to the store
-          set({
-            projects: [...projects, { ...project, lastOpened: new Date().toISOString() }],
-          });
-        }
+  getWorktrees: (projectPath) => {
+    return get().worktreesByProject[projectPath] ?? [];
+  },
 
-        // Set as current project (this will also update history and view)
-        get().setCurrentProject(project);
-        return project;
+  isPrimaryWorktreeBranch: (projectPath, branchName) => {
+    const worktrees = get().worktreesByProject[projectPath] ?? [];
+    const primary = worktrees.find((w) => w.isMain);
+    return primary?.branch === branchName;
+  },
+
+  getPrimaryWorktreeBranch: (projectPath) => {
+    const worktrees = get().worktreesByProject[projectPath] ?? [];
+    const primary = worktrees.find((w) => w.isMain);
+    return primary?.branch ?? null;
+  },
+
+  // Keyboard Shortcuts actions
+  setKeyboardShortcut: (key, value) => {
+    set({
+      keyboardShortcuts: {
+        ...get().keyboardShortcuts,
+        [key]: value,
       },
+    });
+  },
 
-      cyclePrevProject: () => {
-        const { projectHistory, projectHistoryIndex, projects } = get();
-
-        // Filter history to only include valid projects
-        const validHistory = projectHistory.filter((id) => projects.some((p) => p.id === id));
-
-        if (validHistory.length <= 1) return; // Need at least 2 valid projects to cycle
-
-        // Find current position in valid history
-        const currentProjectId = get().currentProject?.id;
-        let currentIndex = currentProjectId
-          ? validHistory.indexOf(currentProjectId)
-          : projectHistoryIndex;
-
-        // If current project not found in valid history, start from 0
-        if (currentIndex === -1) currentIndex = 0;
-
-        // Move to the next index (going back in history = higher index), wrapping around
-        const newIndex = (currentIndex + 1) % validHistory.length;
-        const targetProjectId = validHistory[newIndex];
-        const targetProject = projects.find((p) => p.id === targetProjectId);
-
-        if (targetProject) {
-          // Update history to only include valid projects and set new index
-          set({
-            currentProject: targetProject,
-            projectHistory: validHistory,
-            projectHistoryIndex: newIndex,
-            currentView: 'board',
-          });
-        }
+  setKeyboardShortcuts: (shortcuts) => {
+    set({
+      keyboardShortcuts: {
+        ...get().keyboardShortcuts,
+        ...shortcuts,
       },
+    });
+  },
 
-      cycleNextProject: () => {
-        const { projectHistory, projectHistoryIndex, projects } = get();
+  resetKeyboardShortcuts: () => {
+    set({ keyboardShortcuts: DEFAULT_KEYBOARD_SHORTCUTS });
+  },
 
-        // Filter history to only include valid projects
-        const validHistory = projectHistory.filter((id) => projects.some((p) => p.id === id));
+  // Audio Settings actions
+  setMuteDoneSound: (muted) => set({ muteDoneSound: muted }),
 
-        if (validHistory.length <= 1) return; // Need at least 2 valid projects to cycle
+  // Enhancement Model actions
+  setEnhancementModel: (model) => set({ enhancementModel: model }),
 
-        // Find current position in valid history
-        const currentProjectId = get().currentProject?.id;
-        let currentIndex = currentProjectId
-          ? validHistory.indexOf(currentProjectId)
-          : projectHistoryIndex;
+  // Validation Model actions
+  setValidationModel: (model) => set({ validationModel: model }),
 
-        // If current project not found in valid history, start from 0
-        if (currentIndex === -1) currentIndex = 0;
-
-        // Move to the previous index (going forward = lower index), wrapping around
-        const newIndex = currentIndex <= 0 ? validHistory.length - 1 : currentIndex - 1;
-        const targetProjectId = validHistory[newIndex];
-        const targetProject = projects.find((p) => p.id === targetProjectId);
-
-        if (targetProject) {
-          // Update history to only include valid projects and set new index
-          set({
-            currentProject: targetProject,
-            projectHistory: validHistory,
-            projectHistoryIndex: newIndex,
-            currentView: 'board',
-          });
-        }
+  // Phase Model actions
+  setPhaseModel: async (phase, entry) => {
+    set((state) => ({
+      phaseModels: {
+        ...state.phaseModels,
+        [phase]: entry,
       },
-
-      clearProjectHistory: () => {
-        const currentProject = get().currentProject;
-        if (currentProject) {
-          // Keep only the current project in history
-          set({
-            projectHistory: [currentProject.id],
-            projectHistoryIndex: 0,
-          });
-        } else {
-          // No current project, clear everything
-          set({
-            projectHistory: [],
-            projectHistoryIndex: -1,
-          });
-        }
+    }));
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  setPhaseModels: async (models) => {
+    set((state) => ({
+      phaseModels: {
+        ...state.phaseModels,
+        ...models,
       },
+    }));
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  resetPhaseModels: async () => {
+    set({ phaseModels: DEFAULT_PHASE_MODELS });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  toggleFavoriteModel: (modelId) => {
+    const current = get().favoriteModels;
+    if (current.includes(modelId)) {
+      set({ favoriteModels: current.filter((id) => id !== modelId) });
+    } else {
+      set({ favoriteModels: [...current, modelId] });
+    }
+  },
 
-      // View actions
-      setCurrentView: (view) => set({ currentView: view }),
-      toggleSidebar: () => set({ sidebarOpen: !get().sidebarOpen }),
-      setSidebarOpen: (open) => set({ sidebarOpen: open }),
+  // Cursor CLI Settings actions
+  setEnabledCursorModels: (models) => set({ enabledCursorModels: models }),
+  setCursorDefaultModel: (model) => set({ cursorDefaultModel: model }),
+  toggleCursorModel: (model, enabled) =>
+    set((state) => ({
+      enabledCursorModels: enabled
+        ? [...state.enabledCursorModels, model]
+        : state.enabledCursorModels.filter((m) => m !== model),
+    })),
 
-      // Theme actions
-      setTheme: (theme) => set({ theme }),
+  // Codex CLI Settings actions
+  setEnabledCodexModels: (models) => set({ enabledCodexModels: models }),
+  setCodexDefaultModel: (model) => set({ codexDefaultModel: model }),
+  toggleCodexModel: (model, enabled) =>
+    set((state) => ({
+      enabledCodexModels: enabled
+        ? [...state.enabledCodexModels, model]
+        : state.enabledCodexModels.filter((m) => m !== model),
+    })),
+  setCodexAutoLoadAgents: async (enabled) => {
+    set({ codexAutoLoadAgents: enabled });
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  setCodexSandboxMode: async (mode) => {
+    set({ codexSandboxMode: mode });
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  setCodexApprovalPolicy: async (policy) => {
+    set({ codexApprovalPolicy: policy });
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  setCodexEnableWebSearch: async (enabled) => {
+    set({ codexEnableWebSearch: enabled });
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+  setCodexEnableImages: async (enabled) => {
+    set({ codexEnableImages: enabled });
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
 
-      setProjectTheme: (projectId, theme) => {
-        // Update the project's theme property
-        const projects = get().projects.map((p) =>
-          p.id === projectId ? { ...p, theme: theme === null ? undefined : theme } : p
-        );
-        set({ projects });
+  // OpenCode CLI Settings actions
+  setEnabledOpencodeModels: (models) => set({ enabledOpencodeModels: models }),
+  setOpencodeDefaultModel: (model) => set({ opencodeDefaultModel: model }),
+  toggleOpencodeModel: (model, enabled) =>
+    set((state) => ({
+      enabledOpencodeModels: enabled
+        ? [...state.enabledOpencodeModels, model]
+        : state.enabledOpencodeModels.filter((m) => m !== model),
+    })),
+  setDynamicOpencodeModels: (models) => {
+    // Dynamic models depend on CLI authentication state and are re-discovered each session.
+    // Persist enabled model IDs, but do not auto-enable new models.
+    const filteredModels = models.filter(
+      (model) =>
+        model.provider !== OPENCODE_BEDROCK_PROVIDER_ID &&
+        !model.id.startsWith(OPENCODE_BEDROCK_MODEL_PREFIX)
+    );
+    const currentEnabled = get().enabledDynamicModelIds;
+    const newModelIds = filteredModels.map((m) => m.id);
+    const filteredEnabled = currentEnabled.filter((modelId) => newModelIds.includes(modelId));
 
-        // Also update currentProject if it's the same project
-        const currentProject = get().currentProject;
-        if (currentProject?.id === projectId) {
-          set({
-            currentProject: {
-              ...currentProject,
-              theme: theme === null ? undefined : theme,
-            },
-          });
-        }
+    const nextEnabled = currentEnabled.length === 0 ? [] : filteredEnabled;
+    set({ dynamicOpencodeModels: filteredModels, enabledDynamicModelIds: nextEnabled });
+  },
+  setEnabledDynamicModelIds: (ids) => set({ enabledDynamicModelIds: ids }),
+  toggleDynamicModel: (modelId, enabled) =>
+    set((state) => ({
+      enabledDynamicModelIds: enabled
+        ? [...state.enabledDynamicModelIds, modelId]
+        : state.enabledDynamicModelIds.filter((id) => id !== modelId),
+    })),
+  setCachedOpencodeProviders: (providers) =>
+    set({
+      cachedOpencodeProviders: providers.filter(
+        (provider) => provider.id !== OPENCODE_BEDROCK_PROVIDER_ID
+      ),
+    }),
+
+  // Claude Agent SDK Settings actions
+  setAutoLoadClaudeMd: async (enabled) => {
+    const previous = get().autoLoadClaudeMd;
+    set({ autoLoadClaudeMd: enabled });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    const ok = await syncSettingsToServer();
+    if (!ok) {
+      logger.error('Failed to sync autoLoadClaudeMd setting to server - reverting');
+      set({ autoLoadClaudeMd: previous });
+    }
+  },
+  setSkipSandboxWarning: async (skip) => {
+    const previous = get().skipSandboxWarning;
+    set({ skipSandboxWarning: skip });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    const ok = await syncSettingsToServer();
+    if (!ok) {
+      logger.error('Failed to sync skipSandboxWarning setting to server - reverting');
+      set({ skipSandboxWarning: previous });
+    }
+  },
+
+  // Editor Configuration actions
+  setDefaultEditorCommand: (command) => set({ defaultEditorCommand: command }),
+  // Prompt Customization actions
+  setPromptCustomization: async (customization) => {
+    set({ promptCustomization: customization });
+    // Sync to server settings file
+    const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
+    await syncSettingsToServer();
+  },
+
+  // MCP Server actions
+  addMCPServer: (server) => {
+    const id = `mcp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    set({ mcpServers: [...get().mcpServers, { ...server, id, enabled: true }] });
+  },
+
+  updateMCPServer: (id, updates) => {
+    set({
+      mcpServers: get().mcpServers.map((s) => (s.id === id ? { ...s, ...updates } : s)),
+    });
+  },
+
+  removeMCPServer: (id) => {
+    set({ mcpServers: get().mcpServers.filter((s) => s.id !== id) });
+  },
+
+  reorderMCPServers: (oldIndex, newIndex) => {
+    const servers = [...get().mcpServers];
+    const [movedServer] = servers.splice(oldIndex, 1);
+    servers.splice(newIndex, 0, movedServer);
+    set({ mcpServers: servers });
+  },
+
+  // Project Analysis actions
+  setProjectAnalysis: (analysis) => set({ projectAnalysis: analysis }),
+  setIsAnalyzing: (analyzing) => set({ isAnalyzing: analyzing }),
+  clearAnalysis: () => set({ projectAnalysis: null }),
+
+  // Agent Session actions
+  setLastSelectedSession: (projectPath, sessionId) => {
+    const current = get().lastSelectedSessionByProject;
+    if (sessionId === null) {
+      // Remove the entry for this project
+      const rest = Object.fromEntries(
+        Object.entries(current).filter(([key]) => key !== projectPath)
+      );
+      set({ lastSelectedSessionByProject: rest });
+    } else {
+      set({
+        lastSelectedSessionByProject: {
+          ...current,
+          [projectPath]: sessionId,
+        },
+      });
+    }
+  },
+
+  getLastSelectedSession: (projectPath) => {
+    return get().lastSelectedSessionByProject[projectPath] || null;
+  },
+
+  // Board Background actions
+  setBoardBackground: (projectPath, imagePath) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || {
+      imagePath: null,
+      cardOpacity: 100,
+      columnOpacity: 100,
+      columnBorderEnabled: true,
+      cardGlassmorphism: true,
+      cardBorderEnabled: true,
+      cardBorderOpacity: 100,
+      hideScrollbar: false,
+    };
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          imagePath,
+          // Update imageVersion timestamp to bust browser cache when image changes
+          imageVersion: imagePath ? Date.now() : undefined,
+        },
       },
+    });
+  },
 
-      getEffectiveTheme: () => {
-        // If preview theme is set, use it (for hover preview)
-        const previewTheme = get().previewTheme;
-        if (previewTheme) {
-          return previewTheme;
-        }
-        const currentProject = get().currentProject;
-        // If current project has a theme set, use it
-        if (currentProject?.theme) {
-          return currentProject.theme as ThemeMode;
-        }
-        // Otherwise fall back to global theme
-        return get().theme;
+  setCardOpacity: (projectPath, opacity) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          cardOpacity: opacity,
+        },
       },
+    });
+  },
 
-      setPreviewTheme: (theme) => set({ previewTheme: theme }),
-
-      // Feature actions
-      setFeatures: (features) => set({ features }),
-
-      updateFeature: (id, updates) => {
-        set({
-          features: get().features.map((f) => (f.id === id ? { ...f, ...updates } : f)),
-        });
+  setColumnOpacity: (projectPath, opacity) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          columnOpacity: opacity,
+        },
       },
+    });
+  },
 
-      addFeature: (feature) => {
-        const id = feature.id || `feature-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const featureWithId = { ...feature, id } as unknown as Feature;
-        set({ features: [...get().features, featureWithId] });
-        return featureWithId;
+  getBoardBackground: (projectPath) => {
+    const settings = get().boardBackgroundByProject[projectPath];
+    return settings || defaultBackgroundSettings;
+  },
+
+  setColumnBorderEnabled: (projectPath, enabled) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          columnBorderEnabled: enabled,
+        },
       },
+    });
+  },
 
-      removeFeature: (id) => {
-        set({ features: get().features.filter((f) => f.id !== id) });
+  setCardGlassmorphism: (projectPath, enabled) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          cardGlassmorphism: enabled,
+        },
       },
+    });
+  },
 
-      moveFeature: (id, newStatus) => {
-        set({
-          features: get().features.map((f) => (f.id === id ? { ...f, status: newStatus } : f)),
-        });
+  setCardBorderEnabled: (projectPath, enabled) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          cardBorderEnabled: enabled,
+        },
       },
+    });
+  },
 
-      // App spec actions
-      setAppSpec: (spec) => set({ appSpec: spec }),
+  setCardBorderOpacity: (projectPath, opacity) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          cardBorderOpacity: opacity,
+        },
+      },
+    });
+  },
 
-      // IPC actions
-      setIpcConnected: (connected) => set({ ipcConnected: connected }),
+  setHideScrollbar: (projectPath, hide) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          hideScrollbar: hide,
+        },
+      },
+    });
+  },
 
-      // API Keys actions
-      setApiKeys: (keys) => set({ apiKeys: { ...get().apiKeys, ...keys } }),
+  clearBoardBackground: (projectPath) => {
+    const current = get().boardBackgroundByProject;
+    const existing = current[projectPath] || defaultBackgroundSettings;
+    set({
+      boardBackgroundByProject: {
+        ...current,
+        [projectPath]: {
+          ...existing,
+          imagePath: null, // Only clear the image, preserve other settings
+          imageVersion: undefined, // Clear version when clearing image
+        },
+      },
+    });
+  },
 
-      // Chat Session actions
-      createChatSession: (title) => {
-        const currentProject = get().currentProject;
-        if (!currentProject) {
-          throw new Error('No project selected');
-        }
+  // Terminal actions
+  setTerminalUnlocked: (unlocked, token) => {
+    set({
+      terminalState: {
+        ...get().terminalState,
+        isUnlocked: unlocked,
+        authToken: token || null,
+      },
+    });
+  },
 
-        const now = new Date();
-        const session: ChatSession = {
-          id: `chat-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          title:
-            title || `Chat ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`,
-          projectId: currentProject.id,
-          messages: [
+  setActiveTerminalSession: (sessionId) => {
+    set({
+      terminalState: {
+        ...get().terminalState,
+        activeSessionId: sessionId,
+      },
+    });
+  },
+
+  toggleTerminalMaximized: (sessionId) => {
+    const current = get().terminalState;
+    const newMaximized = current.maximizedSessionId === sessionId ? null : sessionId;
+    set({
+      terminalState: {
+        ...current,
+        maximizedSessionId: newMaximized,
+        // Also set as active when maximizing
+        activeSessionId: newMaximized ?? current.activeSessionId,
+      },
+    });
+  },
+
+  addTerminalToLayout: (sessionId, direction = 'horizontal', targetSessionId) => {
+    const current = get().terminalState;
+    const newTerminal: TerminalPanelContent = {
+      type: 'terminal',
+      sessionId,
+      size: 50,
+    };
+
+    // If no tabs, create first tab
+    if (current.tabs.length === 0) {
+      const newTabId = `tab-${Date.now()}`;
+      set({
+        terminalState: {
+          ...current,
+          tabs: [
             {
-              id: 'welcome',
-              role: 'assistant',
-              content:
-                "Hello! I'm the Automaker Agent. I can help you build software autonomously. What would you like to create today?",
-              timestamp: now,
+              id: newTabId,
+              name: 'Terminal 1',
+              layout: { type: 'terminal', sessionId, size: 100 },
             },
           ],
-          createdAt: now,
-          updatedAt: now,
-          archived: false,
-        };
-
-        set({
-          chatSessions: [...get().chatSessions, session],
-          currentChatSession: session,
-        });
-
-        return session;
-      },
-
-      updateChatSession: (sessionId, updates) => {
-        set({
-          chatSessions: get().chatSessions.map((session) =>
-            session.id === sessionId ? { ...session, ...updates, updatedAt: new Date() } : session
-          ),
-        });
-
-        // Update current session if it's the one being updated
-        const currentSession = get().currentChatSession;
-        if (currentSession && currentSession.id === sessionId) {
-          set({
-            currentChatSession: {
-              ...currentSession,
-              ...updates,
-              updatedAt: new Date(),
-            },
-          });
-        }
-      },
-
-      addMessageToSession: (sessionId, message) => {
-        const sessions = get().chatSessions;
-        const sessionIndex = sessions.findIndex((s) => s.id === sessionId);
-
-        if (sessionIndex >= 0) {
-          const updatedSessions = [...sessions];
-          updatedSessions[sessionIndex] = {
-            ...updatedSessions[sessionIndex],
-            messages: [...updatedSessions[sessionIndex].messages, message],
-            updatedAt: new Date(),
-          };
-
-          set({ chatSessions: updatedSessions });
-
-          // Update current session if it's the one being updated
-          const currentSession = get().currentChatSession;
-          if (currentSession && currentSession.id === sessionId) {
-            set({
-              currentChatSession: updatedSessions[sessionIndex],
-            });
-          }
-        }
-      },
-
-      setCurrentChatSession: (session) => {
-        set({ currentChatSession: session });
-      },
-
-      archiveChatSession: (sessionId) => {
-        get().updateChatSession(sessionId, { archived: true });
-      },
-
-      unarchiveChatSession: (sessionId) => {
-        get().updateChatSession(sessionId, { archived: false });
-      },
-
-      deleteChatSession: (sessionId) => {
-        const currentSession = get().currentChatSession;
-        set({
-          chatSessions: get().chatSessions.filter((s) => s.id !== sessionId),
-          currentChatSession: currentSession?.id === sessionId ? null : currentSession,
-        });
-      },
-
-      setChatHistoryOpen: (open) => set({ chatHistoryOpen: open }),
-
-      toggleChatHistory: () => set({ chatHistoryOpen: !get().chatHistoryOpen }),
-
-      // Auto Mode actions (per-project)
-      setAutoModeRunning: (projectId, running) => {
-        const current = get().autoModeByProject;
-        const projectState = current[projectId] || {
-          isRunning: false,
-          runningTasks: [],
-        };
-        set({
-          autoModeByProject: {
-            ...current,
-            [projectId]: { ...projectState, isRunning: running },
-          },
-        });
-      },
-
-      addRunningTask: (projectId, taskId) => {
-        const current = get().autoModeByProject;
-        const projectState = current[projectId] || {
-          isRunning: false,
-          runningTasks: [],
-        };
-        if (!projectState.runningTasks.includes(taskId)) {
-          set({
-            autoModeByProject: {
-              ...current,
-              [projectId]: {
-                ...projectState,
-                runningTasks: [...projectState.runningTasks, taskId],
-              },
-            },
-          });
-        }
-      },
-
-      removeRunningTask: (projectId, taskId) => {
-        const current = get().autoModeByProject;
-        const projectState = current[projectId] || {
-          isRunning: false,
-          runningTasks: [],
-        };
-        set({
-          autoModeByProject: {
-            ...current,
-            [projectId]: {
-              ...projectState,
-              runningTasks: projectState.runningTasks.filter((id) => id !== taskId),
-            },
-          },
-        });
-      },
-
-      clearRunningTasks: (projectId) => {
-        const current = get().autoModeByProject;
-        const projectState = current[projectId] || {
-          isRunning: false,
-          runningTasks: [],
-        };
-        set({
-          autoModeByProject: {
-            ...current,
-            [projectId]: { ...projectState, runningTasks: [] },
-          },
-        });
-      },
-
-      getAutoModeState: (projectId) => {
-        const projectState = get().autoModeByProject[projectId];
-        return projectState || { isRunning: false, runningTasks: [] };
-      },
-
-      addAutoModeActivity: (activity) => {
-        const id = `activity-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const newActivity: AutoModeActivity = {
-          ...activity,
-          id,
-          timestamp: new Date(),
-        };
-
-        // Keep only the last 100 activities to avoid memory issues
-        const currentLog = get().autoModeActivityLog;
-        const updatedLog = [...currentLog, newActivity].slice(-100);
-
-        set({ autoModeActivityLog: updatedLog });
-      },
-
-      clearAutoModeActivity: () => set({ autoModeActivityLog: [] }),
-
-      setMaxConcurrency: (max) => set({ maxConcurrency: max }),
-
-      // Kanban Card Settings actions
-      setKanbanCardDetailLevel: (level) => set({ kanbanCardDetailLevel: level }),
-      setBoardViewMode: (mode) => set({ boardViewMode: mode }),
-
-      // Feature Default Settings actions
-      setDefaultSkipTests: (skip) => set({ defaultSkipTests: skip }),
-      setEnableDependencyBlocking: (enabled) => set({ enableDependencyBlocking: enabled }),
-
-      // Worktree Settings actions
-      setUseWorktrees: (enabled) => set({ useWorktrees: enabled }),
-
-      setCurrentWorktree: (projectPath, worktreePath, branch) => {
-        const current = get().currentWorktreeByProject;
-        set({
-          currentWorktreeByProject: {
-            ...current,
-            [projectPath]: { path: worktreePath, branch },
-          },
-        });
-      },
-
-      setWorktrees: (projectPath, worktrees) => {
-        const current = get().worktreesByProject;
-        set({
-          worktreesByProject: {
-            ...current,
-            [projectPath]: worktrees,
-          },
-        });
-      },
-
-      getCurrentWorktree: (projectPath) => {
-        return get().currentWorktreeByProject[projectPath] ?? null;
-      },
-
-      getWorktrees: (projectPath) => {
-        return get().worktreesByProject[projectPath] ?? [];
-      },
-
-      isPrimaryWorktreeBranch: (projectPath, branchName) => {
-        const worktrees = get().worktreesByProject[projectPath] ?? [];
-        const primary = worktrees.find((w) => w.isMain);
-        return primary?.branch === branchName;
-      },
-
-      getPrimaryWorktreeBranch: (projectPath) => {
-        const worktrees = get().worktreesByProject[projectPath] ?? [];
-        const primary = worktrees.find((w) => w.isMain);
-        return primary?.branch ?? null;
-      },
-
-      // Profile Display Settings actions
-      setShowProfilesOnly: (enabled) => set({ showProfilesOnly: enabled }),
-
-      // Keyboard Shortcuts actions
-      setKeyboardShortcut: (key, value) => {
-        set({
-          keyboardShortcuts: {
-            ...get().keyboardShortcuts,
-            [key]: value,
-          },
-        });
-      },
-
-      setKeyboardShortcuts: (shortcuts) => {
-        set({
-          keyboardShortcuts: {
-            ...get().keyboardShortcuts,
-            ...shortcuts,
-          },
-        });
-      },
-
-      resetKeyboardShortcuts: () => {
-        set({ keyboardShortcuts: DEFAULT_KEYBOARD_SHORTCUTS });
-      },
-
-      // Audio Settings actions
-      setMuteDoneSound: (muted) => set({ muteDoneSound: muted }),
-
-      // Enhancement Model actions
-      setEnhancementModel: (model) => set({ enhancementModel: model }),
-
-      // Validation Model actions
-      setValidationModel: (model) => set({ validationModel: model }),
-
-      // Claude Agent SDK Settings actions
-      setAutoLoadClaudeMd: async (enabled) => {
-        set({ autoLoadClaudeMd: enabled });
-        // Sync to server settings file
-        const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
-        await syncSettingsToServer();
-      },
-      setEnableSandboxMode: async (enabled) => {
-        set({ enableSandboxMode: enabled });
-        // Sync to server settings file
-        const { syncSettingsToServer } = await import('@/hooks/use-settings-migration');
-        await syncSettingsToServer();
-      },
-
-      // AI Profile actions
-      addAIProfile: (profile) => {
-        const id = `profile-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        set({ aiProfiles: [...get().aiProfiles, { ...profile, id }] });
-      },
-
-      updateAIProfile: (id, updates) => {
-        set({
-          aiProfiles: get().aiProfiles.map((p) => (p.id === id ? { ...p, ...updates } : p)),
-        });
-      },
-
-      removeAIProfile: (id) => {
-        // Only allow removing non-built-in profiles
-        const profile = get().aiProfiles.find((p) => p.id === id);
-        if (profile && !profile.isBuiltIn) {
-          // Clear default if this profile was selected
-          if (get().defaultAIProfileId === id) {
-            set({ defaultAIProfileId: null });
-          }
-          set({ aiProfiles: get().aiProfiles.filter((p) => p.id !== id) });
-        }
-      },
-
-      reorderAIProfiles: (oldIndex, newIndex) => {
-        const profiles = [...get().aiProfiles];
-        const [movedProfile] = profiles.splice(oldIndex, 1);
-        profiles.splice(newIndex, 0, movedProfile);
-        set({ aiProfiles: profiles });
-      },
-
-      resetAIProfiles: () => {
-        // Merge: keep user-created profiles, but refresh all built-in profiles to latest defaults
-        const defaultProfileIds = new Set(DEFAULT_AI_PROFILES.map((p) => p.id));
-        const userProfiles = get().aiProfiles.filter(
-          (p) => !p.isBuiltIn && !defaultProfileIds.has(p.id)
-        );
-        set({ aiProfiles: [...DEFAULT_AI_PROFILES, ...userProfiles] });
-      },
-
-      // Project Analysis actions
-      setProjectAnalysis: (analysis) => set({ projectAnalysis: analysis }),
-      setIsAnalyzing: (analyzing) => set({ isAnalyzing: analyzing }),
-      clearAnalysis: () => set({ projectAnalysis: null }),
-
-      // Agent Session actions
-      setLastSelectedSession: (projectPath, sessionId) => {
-        const current = get().lastSelectedSessionByProject;
-        if (sessionId === null) {
-          // Remove the entry for this project
-          const rest = Object.fromEntries(
-            Object.entries(current).filter(([key]) => key !== projectPath)
-          );
-          set({ lastSelectedSessionByProject: rest });
-        } else {
-          set({
-            lastSelectedSessionByProject: {
-              ...current,
-              [projectPath]: sessionId,
-            },
-          });
-        }
-      },
-
-      getLastSelectedSession: (projectPath) => {
-        return get().lastSelectedSessionByProject[projectPath] || null;
-      },
-
-      // Board Background actions
-      setBoardBackground: (projectPath, imagePath) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || {
-          imagePath: null,
-          cardOpacity: 100,
-          columnOpacity: 100,
-          columnBorderEnabled: true,
-          cardGlassmorphism: true,
-          cardBorderEnabled: true,
-          cardBorderOpacity: 100,
-          hideScrollbar: false,
-        };
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              imagePath,
-              // Update imageVersion timestamp to bust browser cache when image changes
-              imageVersion: imagePath ? Date.now() : undefined,
-            },
-          },
-        });
-      },
-
-      setCardOpacity: (projectPath, opacity) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              cardOpacity: opacity,
-            },
-          },
-        });
-      },
-
-      setColumnOpacity: (projectPath, opacity) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              columnOpacity: opacity,
-            },
-          },
-        });
-      },
-
-      getBoardBackground: (projectPath) => {
-        const settings = get().boardBackgroundByProject[projectPath];
-        return settings || defaultBackgroundSettings;
-      },
-
-      setColumnBorderEnabled: (projectPath, enabled) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              columnBorderEnabled: enabled,
-            },
-          },
-        });
-      },
-
-      setCardGlassmorphism: (projectPath, enabled) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              cardGlassmorphism: enabled,
-            },
-          },
-        });
-      },
-
-      setCardBorderEnabled: (projectPath, enabled) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              cardBorderEnabled: enabled,
-            },
-          },
-        });
-      },
-
-      setCardBorderOpacity: (projectPath, opacity) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              cardBorderOpacity: opacity,
-            },
-          },
-        });
-      },
-
-      setHideScrollbar: (projectPath, hide) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              hideScrollbar: hide,
-            },
-          },
-        });
-      },
-
-      clearBoardBackground: (projectPath) => {
-        const current = get().boardBackgroundByProject;
-        const existing = current[projectPath] || defaultBackgroundSettings;
-        set({
-          boardBackgroundByProject: {
-            ...current,
-            [projectPath]: {
-              ...existing,
-              imagePath: null, // Only clear the image, preserve other settings
-              imageVersion: undefined, // Clear version when clearing image
-            },
-          },
-        });
-      },
-
-      // Terminal actions
-      setTerminalUnlocked: (unlocked, token) => {
-        set({
-          terminalState: {
-            ...get().terminalState,
-            isUnlocked: unlocked,
-            authToken: token || null,
-          },
-        });
-      },
-
-      setActiveTerminalSession: (sessionId) => {
-        set({
-          terminalState: {
-            ...get().terminalState,
-            activeSessionId: sessionId,
-          },
-        });
-      },
-
-      toggleTerminalMaximized: (sessionId) => {
-        const current = get().terminalState;
-        const newMaximized = current.maximizedSessionId === sessionId ? null : sessionId;
-        set({
-          terminalState: {
-            ...current,
-            maximizedSessionId: newMaximized,
-            // Also set as active when maximizing
-            activeSessionId: newMaximized ?? current.activeSessionId,
-          },
-        });
-      },
-
-      addTerminalToLayout: (sessionId, direction = 'horizontal', targetSessionId) => {
-        const current = get().terminalState;
-        const newTerminal: TerminalPanelContent = {
-          type: 'terminal',
-          sessionId,
-          size: 50,
-        };
-
-        // If no tabs, create first tab
-        if (current.tabs.length === 0) {
-          const newTabId = `tab-${Date.now()}`;
-          set({
-            terminalState: {
-              ...current,
-              tabs: [
-                {
-                  id: newTabId,
-                  name: 'Terminal 1',
-                  layout: { type: 'terminal', sessionId, size: 100 },
-                },
-              ],
-              activeTabId: newTabId,
-              activeSessionId: sessionId,
-            },
-          });
-          return;
-        }
-
-        // Add to active tab's layout
-        const activeTab = current.tabs.find((t) => t.id === current.activeTabId);
-        if (!activeTab) return;
-
-        // If targetSessionId is provided, find and split that specific terminal
-        const splitTargetTerminal = (
-          node: TerminalPanelContent,
-          targetId: string,
-          targetDirection: 'horizontal' | 'vertical'
-        ): TerminalPanelContent => {
-          if (node.type === 'terminal') {
-            if (node.sessionId === targetId) {
-              // Found the target - split it
-              return {
-                type: 'split',
-                id: generateSplitId(),
-                direction: targetDirection,
-                panels: [{ ...node, size: 50 }, newTerminal],
-              };
-            }
-            // Not the target, return unchanged
-            return node;
-          }
-          // It's a split - recurse into panels
-          return {
-            ...node,
-            panels: node.panels.map((p) => splitTargetTerminal(p, targetId, targetDirection)),
-          };
-        };
-
-        // Legacy behavior: add to root layout (when no targetSessionId)
-        const addToRootLayout = (
-          node: TerminalPanelContent,
-          targetDirection: 'horizontal' | 'vertical'
-        ): TerminalPanelContent => {
-          if (node.type === 'terminal') {
-            return {
-              type: 'split',
-              id: generateSplitId(),
-              direction: targetDirection,
-              panels: [{ ...node, size: 50 }, newTerminal],
-            };
-          }
-          // If same direction, add to existing split
-          if (node.direction === targetDirection) {
-            const newSize = 100 / (node.panels.length + 1);
-            return {
-              ...node,
-              panels: [
-                ...node.panels.map((p) => ({ ...p, size: newSize })),
-                { ...newTerminal, size: newSize },
-              ],
-            };
-          }
-          // Different direction, wrap in new split
+          activeTabId: newTabId,
+          activeSessionId: sessionId,
+        },
+      });
+      return;
+    }
+
+    // Add to active tab's layout
+    const activeTab = current.tabs.find((t) => t.id === current.activeTabId);
+    if (!activeTab) return;
+
+    // If targetSessionId is provided, find and split that specific terminal
+    const splitTargetTerminal = (
+      node: TerminalPanelContent,
+      targetId: string,
+      targetDirection: 'horizontal' | 'vertical'
+    ): TerminalPanelContent => {
+      if (node.type === 'terminal') {
+        if (node.sessionId === targetId) {
+          // Found the target - split it
           return {
             type: 'split',
             id: generateSplitId(),
             direction: targetDirection,
             panels: [{ ...node, size: 50 }, newTerminal],
           };
-        };
-
-        let newLayout: TerminalPanelContent;
-        if (!activeTab.layout) {
-          newLayout = { type: 'terminal', sessionId, size: 100 };
-        } else if (targetSessionId) {
-          newLayout = splitTargetTerminal(activeTab.layout, targetSessionId, direction);
-        } else {
-          newLayout = addToRootLayout(activeTab.layout, direction);
         }
+        // Not the target, return unchanged
+        return node;
+      }
+      // It's a split - recurse into panels
+      return {
+        ...node,
+        panels: node.panels.map((p) => splitTargetTerminal(p, targetId, targetDirection)),
+      };
+    };
 
-        const newTabs = current.tabs.map((t) =>
-          t.id === current.activeTabId ? { ...t, layout: newLayout } : t
-        );
-
-        set({
-          terminalState: {
-            ...current,
-            tabs: newTabs,
-            activeSessionId: sessionId,
-          },
-        });
-      },
-
-      removeTerminalFromLayout: (sessionId) => {
-        const current = get().terminalState;
-        if (current.tabs.length === 0) return;
-
-        // Find which tab contains this session
-        const findFirstTerminal = (node: TerminalPanelContent | null): string | null => {
-          if (!node) return null;
-          if (node.type === 'terminal') return node.sessionId;
-          for (const panel of node.panels) {
-            const found = findFirstTerminal(panel);
-            if (found) return found;
-          }
-          return null;
+    // Legacy behavior: add to root layout (when no targetSessionId)
+    const addToRootLayout = (
+      node: TerminalPanelContent,
+      targetDirection: 'horizontal' | 'vertical'
+    ): TerminalPanelContent => {
+      if (node.type === 'terminal') {
+        return {
+          type: 'split',
+          id: generateSplitId(),
+          direction: targetDirection,
+          panels: [{ ...node, size: 50 }, newTerminal],
         };
-
-        const removeAndCollapse = (node: TerminalPanelContent): TerminalPanelContent | null => {
-          if (node.type === 'terminal') {
-            return node.sessionId === sessionId ? null : node;
-          }
-          const newPanels: TerminalPanelContent[] = [];
-          for (const panel of node.panels) {
-            const result = removeAndCollapse(panel);
-            if (result !== null) newPanels.push(result);
-          }
-          if (newPanels.length === 0) return null;
-          if (newPanels.length === 1) return newPanels[0];
-          // Normalize sizes to sum to 100%
-          const totalSize = newPanels.reduce((sum, p) => sum + (p.size || 0), 0);
-          const normalizedPanels =
-            totalSize > 0
-              ? newPanels.map((p) => ({ ...p, size: ((p.size || 0) / totalSize) * 100 }))
-              : newPanels.map((p) => ({ ...p, size: 100 / newPanels.length }));
-          return { ...node, panels: normalizedPanels };
+      }
+      // If same direction, add to existing split
+      if (node.direction === targetDirection) {
+        const newSize = 100 / (node.panels.length + 1);
+        return {
+          ...node,
+          panels: [
+            ...node.panels.map((p) => ({ ...p, size: newSize })),
+            { ...newTerminal, size: newSize },
+          ],
         };
+      }
+      // Different direction, wrap in new split
+      return {
+        type: 'split',
+        id: generateSplitId(),
+        direction: targetDirection,
+        panels: [{ ...node, size: 50 }, newTerminal],
+      };
+    };
 
-        let newTabs = current.tabs.map((tab) => {
-          if (!tab.layout) return tab;
-          const newLayout = removeAndCollapse(tab.layout);
-          return { ...tab, layout: newLayout };
-        });
+    let newLayout: TerminalPanelContent;
+    if (!activeTab.layout) {
+      newLayout = { type: 'terminal', sessionId, size: 100 };
+    } else if (targetSessionId) {
+      newLayout = splitTargetTerminal(activeTab.layout, targetSessionId, direction);
+    } else {
+      newLayout = addToRootLayout(activeTab.layout, direction);
+    }
 
-        // Remove empty tabs
-        newTabs = newTabs.filter((tab) => tab.layout !== null);
+    const newTabs = current.tabs.map((t) =>
+      t.id === current.activeTabId ? { ...t, layout: newLayout } : t
+    );
 
-        // Determine new active session
-        const newActiveTabId =
-          newTabs.length > 0
-            ? current.activeTabId && newTabs.find((t) => t.id === current.activeTabId)
-              ? current.activeTabId
-              : newTabs[0].id
-            : null;
-        const newActiveSessionId = newActiveTabId
-          ? findFirstTerminal(newTabs.find((t) => t.id === newActiveTabId)?.layout || null)
-          : null;
-
-        set({
-          terminalState: {
-            ...current,
-            tabs: newTabs,
-            activeTabId: newActiveTabId,
-            activeSessionId: newActiveSessionId,
-          },
-        });
+    set({
+      terminalState: {
+        ...current,
+        tabs: newTabs,
+        activeSessionId: sessionId,
       },
+    });
+  },
 
-      swapTerminals: (sessionId1, sessionId2) => {
-        const current = get().terminalState;
-        if (current.tabs.length === 0) return;
+  removeTerminalFromLayout: (sessionId) => {
+    const current = get().terminalState;
+    if (current.tabs.length === 0) return;
 
-        const swapInLayout = (node: TerminalPanelContent): TerminalPanelContent => {
-          if (node.type === 'terminal') {
-            if (node.sessionId === sessionId1) return { ...node, sessionId: sessionId2 };
-            if (node.sessionId === sessionId2) return { ...node, sessionId: sessionId1 };
-            return node;
-          }
-          return { ...node, panels: node.panels.map(swapInLayout) };
-        };
+    // Find which tab contains this session
+    const findFirstTerminal = (node: TerminalPanelContent | null): string | null => {
+      if (!node) return null;
+      if (node.type === 'terminal') return node.sessionId;
+      for (const panel of node.panels) {
+        const found = findFirstTerminal(panel);
+        if (found) return found;
+      }
+      return null;
+    };
 
-        const newTabs = current.tabs.map((tab) => ({
-          ...tab,
-          layout: tab.layout ? swapInLayout(tab.layout) : null,
-        }));
+    const removeAndCollapse = (node: TerminalPanelContent): TerminalPanelContent | null => {
+      if (node.type === 'terminal') {
+        return node.sessionId === sessionId ? null : node;
+      }
+      const newPanels: TerminalPanelContent[] = [];
+      for (const panel of node.panels) {
+        const result = removeAndCollapse(panel);
+        if (result !== null) newPanels.push(result);
+      }
+      if (newPanels.length === 0) return null;
+      if (newPanels.length === 1) return newPanels[0];
+      // Normalize sizes to sum to 100%
+      const totalSize = newPanels.reduce((sum, p) => sum + (p.size || 0), 0);
+      const normalizedPanels =
+        totalSize > 0
+          ? newPanels.map((p) => ({ ...p, size: ((p.size || 0) / totalSize) * 100 }))
+          : newPanels.map((p) => ({ ...p, size: 100 / newPanels.length }));
+      return { ...node, panels: normalizedPanels };
+    };
 
-        set({
-          terminalState: { ...current, tabs: newTabs },
-        });
+    let newTabs = current.tabs.map((tab) => {
+      if (!tab.layout) return tab;
+      const newLayout = removeAndCollapse(tab.layout);
+      return { ...tab, layout: newLayout };
+    });
+
+    // Remove empty tabs
+    newTabs = newTabs.filter((tab) => tab.layout !== null);
+
+    // Determine new active session
+    const newActiveTabId =
+      newTabs.length > 0
+        ? current.activeTabId && newTabs.find((t) => t.id === current.activeTabId)
+          ? current.activeTabId
+          : newTabs[0].id
+        : null;
+    const newActiveSessionId = newActiveTabId
+      ? findFirstTerminal(newTabs.find((t) => t.id === newActiveTabId)?.layout || null)
+      : null;
+
+    set({
+      terminalState: {
+        ...current,
+        tabs: newTabs,
+        activeTabId: newActiveTabId,
+        activeSessionId: newActiveSessionId,
       },
+    });
+  },
 
-      clearTerminalState: () => {
-        const current = get().terminalState;
-        set({
-          terminalState: {
-            // Preserve auth state - user shouldn't need to re-authenticate
-            isUnlocked: current.isUnlocked,
-            authToken: current.authToken,
-            // Clear session-specific state only
-            tabs: [],
-            activeTabId: null,
-            activeSessionId: null,
-            maximizedSessionId: null,
-            // Preserve user preferences - these should persist across projects
-            defaultFontSize: current.defaultFontSize,
-            defaultRunScript: current.defaultRunScript,
-            screenReaderMode: current.screenReaderMode,
-            fontFamily: current.fontFamily,
-            scrollbackLines: current.scrollbackLines,
-            lineHeight: current.lineHeight,
-            maxSessions: current.maxSessions,
-            // Preserve lastActiveProjectPath - it will be updated separately when needed
-            lastActiveProjectPath: current.lastActiveProjectPath,
-          },
-        });
+  swapTerminals: (sessionId1, sessionId2) => {
+    const current = get().terminalState;
+    if (current.tabs.length === 0) return;
+
+    const swapInLayout = (node: TerminalPanelContent): TerminalPanelContent => {
+      if (node.type === 'terminal') {
+        if (node.sessionId === sessionId1) return { ...node, sessionId: sessionId2 };
+        if (node.sessionId === sessionId2) return { ...node, sessionId: sessionId1 };
+        return node;
+      }
+      return { ...node, panels: node.panels.map(swapInLayout) };
+    };
+
+    const newTabs = current.tabs.map((tab) => ({
+      ...tab,
+      layout: tab.layout ? swapInLayout(tab.layout) : null,
+    }));
+
+    set({
+      terminalState: { ...current, tabs: newTabs },
+    });
+  },
+
+  clearTerminalState: () => {
+    const current = get().terminalState;
+    set({
+      terminalState: {
+        // Preserve auth state - user shouldn't need to re-authenticate
+        isUnlocked: current.isUnlocked,
+        authToken: current.authToken,
+        // Clear session-specific state only
+        tabs: [],
+        activeTabId: null,
+        activeSessionId: null,
+        maximizedSessionId: null,
+        // Preserve user preferences - these should persist across projects
+        defaultFontSize: current.defaultFontSize,
+        defaultRunScript: current.defaultRunScript,
+        screenReaderMode: current.screenReaderMode,
+        fontFamily: current.fontFamily,
+        scrollbackLines: current.scrollbackLines,
+        lineHeight: current.lineHeight,
+        maxSessions: current.maxSessions,
+        // Preserve lastActiveProjectPath - it will be updated separately when needed
+        lastActiveProjectPath: current.lastActiveProjectPath,
       },
+    });
+  },
 
-      setTerminalPanelFontSize: (sessionId, fontSize) => {
-        const current = get().terminalState;
-        const clampedSize = Math.max(8, Math.min(32, fontSize));
+  setTerminalPanelFontSize: (sessionId, fontSize) => {
+    const current = get().terminalState;
+    const clampedSize = Math.max(8, Math.min(32, fontSize));
 
-        const updateFontSize = (node: TerminalPanelContent): TerminalPanelContent => {
-          if (node.type === 'terminal') {
-            if (node.sessionId === sessionId) {
-              return { ...node, fontSize: clampedSize };
-            }
-            return node;
-          }
-          return { ...node, panels: node.panels.map(updateFontSize) };
-        };
-
-        const newTabs = current.tabs.map((tab) => {
-          if (!tab.layout) return tab;
-          return { ...tab, layout: updateFontSize(tab.layout) };
-        });
-
-        set({
-          terminalState: { ...current, tabs: newTabs },
-        });
-      },
-
-      setTerminalDefaultFontSize: (fontSize) => {
-        const current = get().terminalState;
-        const clampedSize = Math.max(8, Math.min(32, fontSize));
-        set({
-          terminalState: { ...current, defaultFontSize: clampedSize },
-        });
-      },
-
-      setTerminalDefaultRunScript: (script) => {
-        const current = get().terminalState;
-        set({
-          terminalState: { ...current, defaultRunScript: script },
-        });
-      },
-
-      setTerminalScreenReaderMode: (enabled) => {
-        const current = get().terminalState;
-        set({
-          terminalState: { ...current, screenReaderMode: enabled },
-        });
-      },
-
-      setTerminalFontFamily: (fontFamily) => {
-        const current = get().terminalState;
-        set({
-          terminalState: { ...current, fontFamily },
-        });
-      },
-
-      setTerminalScrollbackLines: (lines) => {
-        const current = get().terminalState;
-        // Clamp to reasonable range: 1000 - 100000 lines
-        const clampedLines = Math.max(1000, Math.min(100000, lines));
-        set({
-          terminalState: { ...current, scrollbackLines: clampedLines },
-        });
-      },
-
-      setTerminalLineHeight: (lineHeight) => {
-        const current = get().terminalState;
-        // Clamp to reasonable range: 1.0 - 2.0
-        const clampedHeight = Math.max(1.0, Math.min(2.0, lineHeight));
-        set({
-          terminalState: { ...current, lineHeight: clampedHeight },
-        });
-      },
-
-      setTerminalMaxSessions: (maxSessions) => {
-        const current = get().terminalState;
-        // Clamp to reasonable range: 1 - 500
-        const clampedMax = Math.max(1, Math.min(500, maxSessions));
-        set({
-          terminalState: { ...current, maxSessions: clampedMax },
-        });
-      },
-
-      setTerminalLastActiveProjectPath: (projectPath) => {
-        const current = get().terminalState;
-        set({
-          terminalState: { ...current, lastActiveProjectPath: projectPath },
-        });
-      },
-
-      addTerminalTab: (name) => {
-        const current = get().terminalState;
-        const newTabId = `tab-${Date.now()}`;
-        const tabNumber = current.tabs.length + 1;
-        const newTab: TerminalTab = {
-          id: newTabId,
-          name: name || `Terminal ${tabNumber}`,
-          layout: null,
-        };
-        set({
-          terminalState: {
-            ...current,
-            tabs: [...current.tabs, newTab],
-            activeTabId: newTabId,
-          },
-        });
-        return newTabId;
-      },
-
-      removeTerminalTab: (tabId) => {
-        const current = get().terminalState;
-        const newTabs = current.tabs.filter((t) => t.id !== tabId);
-        let newActiveTabId = current.activeTabId;
-        let newActiveSessionId = current.activeSessionId;
-
-        if (current.activeTabId === tabId) {
-          newActiveTabId = newTabs.length > 0 ? newTabs[0].id : null;
-          if (newActiveTabId) {
-            const newActiveTab = newTabs.find((t) => t.id === newActiveTabId);
-            const findFirst = (node: TerminalPanelContent): string | null => {
-              if (node.type === 'terminal') return node.sessionId;
-              for (const p of node.panels) {
-                const f = findFirst(p);
-                if (f) return f;
-              }
-              return null;
-            };
-            newActiveSessionId = newActiveTab?.layout ? findFirst(newActiveTab.layout) : null;
-          } else {
-            newActiveSessionId = null;
-          }
+    const updateFontSize = (node: TerminalPanelContent): TerminalPanelContent => {
+      if (node.type === 'terminal') {
+        if (node.sessionId === sessionId) {
+          return { ...node, fontSize: clampedSize };
         }
+        return node;
+      }
+      return { ...node, panels: node.panels.map(updateFontSize) };
+    };
 
-        set({
-          terminalState: {
-            ...current,
-            tabs: newTabs,
-            activeTabId: newActiveTabId,
-            activeSessionId: newActiveSessionId,
-          },
-        });
+    const newTabs = current.tabs.map((tab) => {
+      if (!tab.layout) return tab;
+      return { ...tab, layout: updateFontSize(tab.layout) };
+    });
+
+    set({
+      terminalState: { ...current, tabs: newTabs },
+    });
+  },
+
+  setTerminalDefaultFontSize: (fontSize) => {
+    const current = get().terminalState;
+    const clampedSize = Math.max(8, Math.min(32, fontSize));
+    set({
+      terminalState: { ...current, defaultFontSize: clampedSize },
+    });
+  },
+
+  setTerminalDefaultRunScript: (script) => {
+    const current = get().terminalState;
+    set({
+      terminalState: { ...current, defaultRunScript: script },
+    });
+  },
+
+  setTerminalScreenReaderMode: (enabled) => {
+    const current = get().terminalState;
+    set({
+      terminalState: { ...current, screenReaderMode: enabled },
+    });
+  },
+
+  setTerminalFontFamily: (fontFamily) => {
+    const current = get().terminalState;
+    set({
+      terminalState: { ...current, fontFamily },
+    });
+  },
+
+  setTerminalScrollbackLines: (lines) => {
+    const current = get().terminalState;
+    // Clamp to reasonable range: 1000 - 100000 lines
+    const clampedLines = Math.max(1000, Math.min(100000, lines));
+    set({
+      terminalState: { ...current, scrollbackLines: clampedLines },
+    });
+  },
+
+  setTerminalLineHeight: (lineHeight) => {
+    const current = get().terminalState;
+    // Clamp to reasonable range: 1.0 - 2.0
+    const clampedHeight = Math.max(1.0, Math.min(2.0, lineHeight));
+    set({
+      terminalState: { ...current, lineHeight: clampedHeight },
+    });
+  },
+
+  setTerminalMaxSessions: (maxSessions) => {
+    const current = get().terminalState;
+    // Clamp to reasonable range: 1 - 500
+    const clampedMax = Math.max(1, Math.min(500, maxSessions));
+    set({
+      terminalState: { ...current, maxSessions: clampedMax },
+    });
+  },
+
+  setTerminalLastActiveProjectPath: (projectPath) => {
+    const current = get().terminalState;
+    set({
+      terminalState: { ...current, lastActiveProjectPath: projectPath },
+    });
+  },
+
+  addTerminalTab: (name) => {
+    const current = get().terminalState;
+    const newTabId = `tab-${Date.now()}`;
+    const tabNumber = current.tabs.length + 1;
+    const newTab: TerminalTab = {
+      id: newTabId,
+      name: name || `Terminal ${tabNumber}`,
+      layout: null,
+    };
+    set({
+      terminalState: {
+        ...current,
+        tabs: [...current.tabs, newTab],
+        activeTabId: newTabId,
       },
+    });
+    return newTabId;
+  },
 
-      setActiveTerminalTab: (tabId) => {
-        const current = get().terminalState;
-        const tab = current.tabs.find((t) => t.id === tabId);
-        if (!tab) return;
+  removeTerminalTab: (tabId) => {
+    const current = get().terminalState;
+    const newTabs = current.tabs.filter((t) => t.id !== tabId);
+    let newActiveTabId = current.activeTabId;
+    let newActiveSessionId = current.activeSessionId;
 
-        let newActiveSessionId = current.activeSessionId;
-        if (tab.layout) {
-          const findFirst = (node: TerminalPanelContent): string | null => {
-            if (node.type === 'terminal') return node.sessionId;
-            for (const p of node.panels) {
-              const f = findFirst(p);
-              if (f) return f;
-            }
-            return null;
-          };
-          newActiveSessionId = findFirst(tab.layout);
-        }
-
-        set({
-          terminalState: {
-            ...current,
-            activeTabId: tabId,
-            activeSessionId: newActiveSessionId,
-            // Clear maximized state when switching tabs - the maximized terminal
-            // belongs to the previous tab and shouldn't persist across tab switches
-            maximizedSessionId: null,
-          },
-        });
-      },
-
-      renameTerminalTab: (tabId, name) => {
-        const current = get().terminalState;
-        const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, name } : t));
-        set({
-          terminalState: { ...current, tabs: newTabs },
-        });
-      },
-
-      reorderTerminalTabs: (fromTabId, toTabId) => {
-        const current = get().terminalState;
-        const fromIndex = current.tabs.findIndex((t) => t.id === fromTabId);
-        const toIndex = current.tabs.findIndex((t) => t.id === toTabId);
-
-        if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) {
-          return;
-        }
-
-        // Reorder tabs by moving fromIndex to toIndex
-        const newTabs = [...current.tabs];
-        const [movedTab] = newTabs.splice(fromIndex, 1);
-        newTabs.splice(toIndex, 0, movedTab);
-
-        set({
-          terminalState: { ...current, tabs: newTabs },
-        });
-      },
-
-      moveTerminalToTab: (sessionId, targetTabId) => {
-        const current = get().terminalState;
-
-        let sourceTabId: string | null = null;
-        let originalTerminalNode: (TerminalPanelContent & { type: 'terminal' }) | null = null;
-
-        const findTerminal = (
-          node: TerminalPanelContent
-        ): (TerminalPanelContent & { type: 'terminal' }) | null => {
-          if (node.type === 'terminal') {
-            return node.sessionId === sessionId ? node : null;
-          }
-          for (const panel of node.panels) {
-            const found = findTerminal(panel);
-            if (found) return found;
-          }
-          return null;
-        };
-
-        for (const tab of current.tabs) {
-          if (tab.layout) {
-            const found = findTerminal(tab.layout);
-            if (found) {
-              sourceTabId = tab.id;
-              originalTerminalNode = found;
-              break;
-            }
-          }
-        }
-        if (!sourceTabId || !originalTerminalNode) return;
-        if (sourceTabId === targetTabId) return;
-
-        const sourceTab = current.tabs.find((t) => t.id === sourceTabId);
-        if (!sourceTab?.layout) return;
-
-        const removeAndCollapse = (node: TerminalPanelContent): TerminalPanelContent | null => {
-          if (node.type === 'terminal') {
-            return node.sessionId === sessionId ? null : node;
-          }
-          const newPanels: TerminalPanelContent[] = [];
-          for (const panel of node.panels) {
-            const result = removeAndCollapse(panel);
-            if (result !== null) newPanels.push(result);
-          }
-          if (newPanels.length === 0) return null;
-          if (newPanels.length === 1) return newPanels[0];
-          // Normalize sizes to sum to 100%
-          const totalSize = newPanels.reduce((sum, p) => sum + (p.size || 0), 0);
-          const normalizedPanels =
-            totalSize > 0
-              ? newPanels.map((p) => ({ ...p, size: ((p.size || 0) / totalSize) * 100 }))
-              : newPanels.map((p) => ({ ...p, size: 100 / newPanels.length }));
-          return { ...node, panels: normalizedPanels };
-        };
-
-        const newSourceLayout = removeAndCollapse(sourceTab.layout);
-
-        let finalTargetTabId = targetTabId;
-        let newTabs = current.tabs;
-
-        if (targetTabId === 'new') {
-          const newTabId = `tab-${Date.now()}`;
-          const sourceWillBeRemoved = !newSourceLayout;
-          const tabName = sourceWillBeRemoved
-            ? sourceTab.name
-            : `Terminal ${current.tabs.length + 1}`;
-          newTabs = [
-            ...current.tabs,
-            {
-              id: newTabId,
-              name: tabName,
-              layout: {
-                type: 'terminal',
-                sessionId,
-                size: 100,
-                fontSize: originalTerminalNode.fontSize,
-              },
-            },
-          ];
-          finalTargetTabId = newTabId;
-        } else {
-          const targetTab = current.tabs.find((t) => t.id === targetTabId);
-          if (!targetTab) return;
-
-          const terminalNode: TerminalPanelContent = {
-            type: 'terminal',
-            sessionId,
-            size: 50,
-            fontSize: originalTerminalNode.fontSize,
-          };
-          let newTargetLayout: TerminalPanelContent;
-
-          if (!targetTab.layout) {
-            newTargetLayout = {
-              type: 'terminal',
-              sessionId,
-              size: 100,
-              fontSize: originalTerminalNode.fontSize,
-            };
-          } else if (targetTab.layout.type === 'terminal') {
-            newTargetLayout = {
-              type: 'split',
-              id: generateSplitId(),
-              direction: 'horizontal',
-              panels: [{ ...targetTab.layout, size: 50 }, terminalNode],
-            };
-          } else {
-            newTargetLayout = {
-              ...targetTab.layout,
-              panels: [...targetTab.layout.panels, terminalNode],
-            };
-          }
-
-          newTabs = current.tabs.map((t) =>
-            t.id === targetTabId ? { ...t, layout: newTargetLayout } : t
-          );
-        }
-
-        if (!newSourceLayout) {
-          newTabs = newTabs.filter((t) => t.id !== sourceTabId);
-        } else {
-          newTabs = newTabs.map((t) =>
-            t.id === sourceTabId ? { ...t, layout: newSourceLayout } : t
-          );
-        }
-
-        set({
-          terminalState: {
-            ...current,
-            tabs: newTabs,
-            activeTabId: finalTargetTabId,
-            activeSessionId: sessionId,
-          },
-        });
-      },
-
-      addTerminalToTab: (sessionId, tabId, direction = 'horizontal') => {
-        const current = get().terminalState;
-        const tab = current.tabs.find((t) => t.id === tabId);
-        if (!tab) return;
-
-        const terminalNode: TerminalPanelContent = {
-          type: 'terminal',
-          sessionId,
-          size: 50,
-        };
-        let newLayout: TerminalPanelContent;
-
-        if (!tab.layout) {
-          newLayout = { type: 'terminal', sessionId, size: 100 };
-        } else if (tab.layout.type === 'terminal') {
-          newLayout = {
-            type: 'split',
-            id: generateSplitId(),
-            direction,
-            panels: [{ ...tab.layout, size: 50 }, terminalNode],
-          };
-        } else {
-          if (tab.layout.direction === direction) {
-            const newSize = 100 / (tab.layout.panels.length + 1);
-            newLayout = {
-              ...tab.layout,
-              panels: [
-                ...tab.layout.panels.map((p) => ({ ...p, size: newSize })),
-                { ...terminalNode, size: newSize },
-              ],
-            };
-          } else {
-            newLayout = {
-              type: 'split',
-              id: generateSplitId(),
-              direction,
-              panels: [{ ...tab.layout, size: 50 }, terminalNode],
-            };
-          }
-        }
-
-        const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, layout: newLayout } : t));
-
-        set({
-          terminalState: {
-            ...current,
-            tabs: newTabs,
-            activeTabId: tabId,
-            activeSessionId: sessionId,
-          },
-        });
-      },
-
-      setTerminalTabLayout: (tabId, layout, activeSessionId) => {
-        const current = get().terminalState;
-        const tab = current.tabs.find((t) => t.id === tabId);
-        if (!tab) return;
-
-        const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, layout } : t));
-
-        // Find first terminal in layout if no activeSessionId provided
+    if (current.activeTabId === tabId) {
+      newActiveTabId = newTabs.length > 0 ? newTabs[0].id : null;
+      if (newActiveTabId) {
+        const newActiveTab = newTabs.find((t) => t.id === newActiveTabId);
         const findFirst = (node: TerminalPanelContent): string | null => {
           if (node.type === 'terminal') return node.sessionId;
           for (const p of node.panels) {
-            const found = findFirst(p);
-            if (found) return found;
+            const f = findFirst(p);
+            if (f) return f;
           }
           return null;
         };
-
-        const newActiveSessionId = activeSessionId || findFirst(layout);
-
-        set({
-          terminalState: {
-            ...current,
-            tabs: newTabs,
-            activeTabId: tabId,
-            activeSessionId: newActiveSessionId,
-          },
-        });
-      },
-
-      updateTerminalPanelSizes: (tabId, panelKeys, sizes) => {
-        const current = get().terminalState;
-        const tab = current.tabs.find((t) => t.id === tabId);
-        if (!tab || !tab.layout) return;
-
-        // Create a map of panel key to new size
-        const sizeMap = new Map<string, number>();
-        panelKeys.forEach((key, index) => {
-          sizeMap.set(key, sizes[index]);
-        });
-
-        // Helper to generate panel key (matches getPanelKey in terminal-view.tsx)
-        const getPanelKey = (panel: TerminalPanelContent): string => {
-          if (panel.type === 'terminal') return panel.sessionId;
-          const childKeys = panel.panels.map(getPanelKey).join('-');
-          return `split-${panel.direction}-${childKeys}`;
-        };
-
-        // Recursively update sizes in the layout
-        const updateSizes = (panel: TerminalPanelContent): TerminalPanelContent => {
-          const key = getPanelKey(panel);
-          const newSize = sizeMap.get(key);
-
-          if (panel.type === 'terminal') {
-            return newSize !== undefined ? { ...panel, size: newSize } : panel;
-          }
-
-          return {
-            ...panel,
-            size: newSize !== undefined ? newSize : panel.size,
-            panels: panel.panels.map(updateSizes),
-          };
-        };
-
-        const updatedLayout = updateSizes(tab.layout);
-
-        const newTabs = current.tabs.map((t) =>
-          t.id === tabId ? { ...t, layout: updatedLayout } : t
-        );
-
-        set({
-          terminalState: { ...current, tabs: newTabs },
-        });
-      },
-
-      // Convert runtime layout to persisted format (preserves sessionIds for reconnection)
-      saveTerminalLayout: (projectPath) => {
-        const current = get().terminalState;
-        if (current.tabs.length === 0) {
-          // Nothing to save, clear any existing layout
-          const { [projectPath]: _, ...rest } = get().terminalLayoutByProject;
-          set({ terminalLayoutByProject: rest });
-          return;
-        }
-
-        // Convert TerminalPanelContent to PersistedTerminalPanel
-        // Now preserves sessionId so we can reconnect when switching back
-        const persistPanel = (panel: TerminalPanelContent): PersistedTerminalPanel => {
-          if (panel.type === 'terminal') {
-            return {
-              type: 'terminal',
-              size: panel.size,
-              fontSize: panel.fontSize,
-              sessionId: panel.sessionId, // Preserve for reconnection
-            };
-          }
-          return {
-            type: 'split',
-            id: panel.id, // Preserve stable ID
-            direction: panel.direction,
-            panels: panel.panels.map(persistPanel),
-            size: panel.size,
-          };
-        };
-
-        const persistedTabs: PersistedTerminalTab[] = current.tabs.map((tab) => ({
-          id: tab.id,
-          name: tab.name,
-          layout: tab.layout ? persistPanel(tab.layout) : null,
-        }));
-
-        const activeTabIndex = current.tabs.findIndex((t) => t.id === current.activeTabId);
-
-        const persisted: PersistedTerminalState = {
-          tabs: persistedTabs,
-          activeTabIndex: activeTabIndex >= 0 ? activeTabIndex : 0,
-          defaultFontSize: current.defaultFontSize,
-          defaultRunScript: current.defaultRunScript,
-          screenReaderMode: current.screenReaderMode,
-          fontFamily: current.fontFamily,
-          scrollbackLines: current.scrollbackLines,
-          lineHeight: current.lineHeight,
-        };
-
-        set({
-          terminalLayoutByProject: {
-            ...get().terminalLayoutByProject,
-            [projectPath]: persisted,
-          },
-        });
-      },
-
-      getPersistedTerminalLayout: (projectPath) => {
-        return get().terminalLayoutByProject[projectPath] || null;
-      },
-
-      clearPersistedTerminalLayout: (projectPath) => {
-        const { [projectPath]: _, ...rest } = get().terminalLayoutByProject;
-        set({ terminalLayoutByProject: rest });
-      },
-
-      // Spec Creation actions
-      setSpecCreatingForProject: (projectPath) => {
-        set({ specCreatingForProject: projectPath });
-      },
-
-      isSpecCreatingForProject: (projectPath) => {
-        return get().specCreatingForProject === projectPath;
-      },
-
-      setDefaultPlanningMode: (mode) => set({ defaultPlanningMode: mode }),
-      setDefaultRequirePlanApproval: (require) => set({ defaultRequirePlanApproval: require }),
-      setDefaultAIProfileId: (profileId) => set({ defaultAIProfileId: profileId }),
-
-      // Plan Approval actions
-      setPendingPlanApproval: (approval) => set({ pendingPlanApproval: approval }),
-
-      // Claude Usage Tracking actions
-      setClaudeRefreshInterval: (interval: number) => set({ claudeRefreshInterval: interval }),
-      setClaudeUsageLastUpdated: (timestamp: number) => set({ claudeUsageLastUpdated: timestamp }),
-      setClaudeUsage: (usage: ClaudeUsage | null) =>
-        set({
-          claudeUsage: usage,
-          claudeUsageLastUpdated: usage ? Date.now() : null,
-        }),
-
-      // Pipeline actions
-      setPipelineConfig: (projectPath, config) => {
-        set({
-          pipelineConfigByProject: {
-            ...get().pipelineConfigByProject,
-            [projectPath]: config,
-          },
-        });
-      },
-
-      getPipelineConfig: (projectPath) => {
-        return get().pipelineConfigByProject[projectPath] || null;
-      },
-
-      addPipelineStep: (projectPath, step) => {
-        const config = get().pipelineConfigByProject[projectPath] || { version: 1, steps: [] };
-        const now = new Date().toISOString();
-        const newStep: PipelineStep = {
-          ...step,
-          id: `step_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        const newSteps = [...config.steps, newStep].sort((a, b) => a.order - b.order);
-        newSteps.forEach((s, index) => {
-          s.order = index;
-        });
-
-        set({
-          pipelineConfigByProject: {
-            ...get().pipelineConfigByProject,
-            [projectPath]: { ...config, steps: newSteps },
-          },
-        });
-
-        return newStep;
-      },
-
-      updatePipelineStep: (projectPath, stepId, updates) => {
-        const config = get().pipelineConfigByProject[projectPath];
-        if (!config) return;
-
-        const stepIndex = config.steps.findIndex((s) => s.id === stepId);
-        if (stepIndex === -1) return;
-
-        const updatedSteps = [...config.steps];
-        updatedSteps[stepIndex] = {
-          ...updatedSteps[stepIndex],
-          ...updates,
-          updatedAt: new Date().toISOString(),
-        };
-
-        set({
-          pipelineConfigByProject: {
-            ...get().pipelineConfigByProject,
-            [projectPath]: { ...config, steps: updatedSteps },
-          },
-        });
-      },
-
-      deletePipelineStep: (projectPath, stepId) => {
-        const config = get().pipelineConfigByProject[projectPath];
-        if (!config) return;
-
-        const newSteps = config.steps.filter((s) => s.id !== stepId);
-        newSteps.forEach((s, index) => {
-          s.order = index;
-        });
-
-        set({
-          pipelineConfigByProject: {
-            ...get().pipelineConfigByProject,
-            [projectPath]: { ...config, steps: newSteps },
-          },
-        });
-      },
-
-      reorderPipelineSteps: (projectPath, stepIds) => {
-        const config = get().pipelineConfigByProject[projectPath];
-        if (!config) return;
-
-        const stepMap = new Map(config.steps.map((s) => [s.id, s]));
-        const reorderedSteps = stepIds
-          .map((id, index) => {
-            const step = stepMap.get(id);
-            if (!step) return null;
-            return { ...step, order: index, updatedAt: new Date().toISOString() };
-          })
-          .filter((s): s is PipelineStep => s !== null);
-
-        set({
-          pipelineConfigByProject: {
-            ...get().pipelineConfigByProject,
-            [projectPath]: { ...config, steps: reorderedSteps },
-          },
-        });
-      },
-
-      // Reset
-      reset: () => set(initialState),
-    }),
-    {
-      name: 'automaker-storage',
-      version: 2, // Increment when making breaking changes to persisted state
-      // Custom merge function to properly restore terminal settings on every load
-      // The default shallow merge doesn't work because we persist terminalSettings
-      // separately from terminalState (to avoid persisting session data like tabs)
-      merge: (persistedState, currentState) => {
-        const persisted = persistedState as Partial<AppState> & {
-          terminalSettings?: PersistedTerminalSettings;
-        };
-        const current = currentState as AppState & AppActions;
-
-        // Start with default shallow merge
-        const merged = { ...current, ...persisted } as AppState & AppActions;
-
-        // Restore terminal settings into terminalState
-        // terminalSettings is persisted separately from terminalState to avoid
-        // persisting session data (tabs, activeSessionId, etc.)
-        if (persisted.terminalSettings) {
-          merged.terminalState = {
-            // Start with current (initial) terminalState for session fields
-            ...current.terminalState,
-            // Override with persisted settings
-            defaultFontSize:
-              persisted.terminalSettings.defaultFontSize ?? current.terminalState.defaultFontSize,
-            defaultRunScript:
-              persisted.terminalSettings.defaultRunScript ?? current.terminalState.defaultRunScript,
-            screenReaderMode:
-              persisted.terminalSettings.screenReaderMode ?? current.terminalState.screenReaderMode,
-            fontFamily: persisted.terminalSettings.fontFamily ?? current.terminalState.fontFamily,
-            scrollbackLines:
-              persisted.terminalSettings.scrollbackLines ?? current.terminalState.scrollbackLines,
-            lineHeight: persisted.terminalSettings.lineHeight ?? current.terminalState.lineHeight,
-            maxSessions:
-              persisted.terminalSettings.maxSessions ?? current.terminalState.maxSessions,
-          };
-        }
-
-        return merged;
-      },
-      migrate: (persistedState: unknown, version: number) => {
-        const state = persistedState as Partial<AppState>;
-
-        // Migration from version 0 (no version) to version 1:
-        // - Change addContextFile shortcut from "F" to "N"
-        if (version === 0) {
-          if (state.keyboardShortcuts?.addContextFile === 'F') {
-            state.keyboardShortcuts.addContextFile = 'N';
-          }
-        }
-
-        // Migration from version 1 to version 2:
-        // - Change terminal shortcut from "Cmd+`" to "T"
-        if (version <= 1) {
-          if (
-            state.keyboardShortcuts?.terminal === 'Cmd+`' ||
-            state.keyboardShortcuts?.terminal === undefined
-          ) {
-            state.keyboardShortcuts = {
-              ...DEFAULT_KEYBOARD_SHORTCUTS,
-              ...state.keyboardShortcuts,
-              terminal: 'T',
-            };
-          }
-        }
-
-        // Rehydrate terminal settings from persisted state
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const persistedSettings = (state as any).terminalSettings as
-          | PersistedTerminalSettings
-          | undefined;
-        if (persistedSettings) {
-          state.terminalState = {
-            ...state.terminalState,
-            // Preserve session state (tabs, activeTabId, etc.) but restore settings
-            isUnlocked: state.terminalState?.isUnlocked ?? false,
-            authToken: state.terminalState?.authToken ?? null,
-            tabs: state.terminalState?.tabs ?? [],
-            activeTabId: state.terminalState?.activeTabId ?? null,
-            activeSessionId: state.terminalState?.activeSessionId ?? null,
-            maximizedSessionId: state.terminalState?.maximizedSessionId ?? null,
-            lastActiveProjectPath: state.terminalState?.lastActiveProjectPath ?? null,
-            // Restore persisted settings
-            defaultFontSize: persistedSettings.defaultFontSize ?? 14,
-            defaultRunScript: persistedSettings.defaultRunScript ?? '',
-            screenReaderMode: persistedSettings.screenReaderMode ?? false,
-            fontFamily: persistedSettings.fontFamily ?? "Menlo, Monaco, 'Courier New', monospace",
-            scrollbackLines: persistedSettings.scrollbackLines ?? 5000,
-            lineHeight: persistedSettings.lineHeight ?? 1.0,
-            maxSessions: persistedSettings.maxSessions ?? 100,
-          };
-        }
-
-        return state as AppState;
-      },
-      partialize: (state) =>
-        ({
-          // Project management
-          projects: state.projects,
-          currentProject: state.currentProject,
-          trashedProjects: state.trashedProjects,
-          projectHistory: state.projectHistory,
-          projectHistoryIndex: state.projectHistoryIndex,
-          // Features - cached locally for faster hydration (authoritative source is server)
-          features: state.features,
-          // UI state
-          currentView: state.currentView,
-          theme: state.theme,
-          sidebarOpen: state.sidebarOpen,
-          chatHistoryOpen: state.chatHistoryOpen,
-          kanbanCardDetailLevel: state.kanbanCardDetailLevel,
-          boardViewMode: state.boardViewMode,
-          // Settings
-          apiKeys: state.apiKeys,
-          maxConcurrency: state.maxConcurrency,
-          // Note: autoModeByProject is intentionally NOT persisted
-          // Auto-mode should always default to OFF on app refresh
-          defaultSkipTests: state.defaultSkipTests,
-          enableDependencyBlocking: state.enableDependencyBlocking,
-          useWorktrees: state.useWorktrees,
-          currentWorktreeByProject: state.currentWorktreeByProject,
-          worktreesByProject: state.worktreesByProject,
-          showProfilesOnly: state.showProfilesOnly,
-          keyboardShortcuts: state.keyboardShortcuts,
-          muteDoneSound: state.muteDoneSound,
-          enhancementModel: state.enhancementModel,
-          validationModel: state.validationModel,
-          autoLoadClaudeMd: state.autoLoadClaudeMd,
-          enableSandboxMode: state.enableSandboxMode,
-          // Profiles and sessions
-          aiProfiles: state.aiProfiles,
-          chatSessions: state.chatSessions,
-          lastSelectedSessionByProject: state.lastSelectedSessionByProject,
-          // Board background settings
-          boardBackgroundByProject: state.boardBackgroundByProject,
-          // Terminal layout persistence (per-project)
-          terminalLayoutByProject: state.terminalLayoutByProject,
-          // Terminal settings persistence (global)
-          terminalSettings: {
-            defaultFontSize: state.terminalState.defaultFontSize,
-            defaultRunScript: state.terminalState.defaultRunScript,
-            screenReaderMode: state.terminalState.screenReaderMode,
-            fontFamily: state.terminalState.fontFamily,
-            scrollbackLines: state.terminalState.scrollbackLines,
-            lineHeight: state.terminalState.lineHeight,
-            maxSessions: state.terminalState.maxSessions,
-          } as PersistedTerminalSettings,
-          defaultPlanningMode: state.defaultPlanningMode,
-          defaultRequirePlanApproval: state.defaultRequirePlanApproval,
-          defaultAIProfileId: state.defaultAIProfileId,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        }) as any,
+        newActiveSessionId = newActiveTab?.layout ? findFirst(newActiveTab.layout) : null;
+      } else {
+        newActiveSessionId = null;
+      }
     }
-  )
-);
+
+    set({
+      terminalState: {
+        ...current,
+        tabs: newTabs,
+        activeTabId: newActiveTabId,
+        activeSessionId: newActiveSessionId,
+      },
+    });
+  },
+
+  setActiveTerminalTab: (tabId) => {
+    const current = get().terminalState;
+    const tab = current.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    let newActiveSessionId = current.activeSessionId;
+    if (tab.layout) {
+      const findFirst = (node: TerminalPanelContent): string | null => {
+        if (node.type === 'terminal') return node.sessionId;
+        for (const p of node.panels) {
+          const f = findFirst(p);
+          if (f) return f;
+        }
+        return null;
+      };
+      newActiveSessionId = findFirst(tab.layout);
+    }
+
+    set({
+      terminalState: {
+        ...current,
+        activeTabId: tabId,
+        activeSessionId: newActiveSessionId,
+        // Clear maximized state when switching tabs - the maximized terminal
+        // belongs to the previous tab and shouldn't persist across tab switches
+        maximizedSessionId: null,
+      },
+    });
+  },
+
+  renameTerminalTab: (tabId, name) => {
+    const current = get().terminalState;
+    const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, name } : t));
+    set({
+      terminalState: { ...current, tabs: newTabs },
+    });
+  },
+
+  reorderTerminalTabs: (fromTabId, toTabId) => {
+    const current = get().terminalState;
+    const fromIndex = current.tabs.findIndex((t) => t.id === fromTabId);
+    const toIndex = current.tabs.findIndex((t) => t.id === toTabId);
+
+    if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) {
+      return;
+    }
+
+    // Reorder tabs by moving fromIndex to toIndex
+    const newTabs = [...current.tabs];
+    const [movedTab] = newTabs.splice(fromIndex, 1);
+    newTabs.splice(toIndex, 0, movedTab);
+
+    set({
+      terminalState: { ...current, tabs: newTabs },
+    });
+  },
+
+  moveTerminalToTab: (sessionId, targetTabId) => {
+    const current = get().terminalState;
+
+    let sourceTabId: string | null = null;
+    let originalTerminalNode: (TerminalPanelContent & { type: 'terminal' }) | null = null;
+
+    const findTerminal = (
+      node: TerminalPanelContent
+    ): (TerminalPanelContent & { type: 'terminal' }) | null => {
+      if (node.type === 'terminal') {
+        return node.sessionId === sessionId ? node : null;
+      }
+      for (const panel of node.panels) {
+        const found = findTerminal(panel);
+        if (found) return found;
+      }
+      return null;
+    };
+
+    for (const tab of current.tabs) {
+      if (tab.layout) {
+        const found = findTerminal(tab.layout);
+        if (found) {
+          sourceTabId = tab.id;
+          originalTerminalNode = found;
+          break;
+        }
+      }
+    }
+    if (!sourceTabId || !originalTerminalNode) return;
+    if (sourceTabId === targetTabId) return;
+
+    const sourceTab = current.tabs.find((t) => t.id === sourceTabId);
+    if (!sourceTab?.layout) return;
+
+    const removeAndCollapse = (node: TerminalPanelContent): TerminalPanelContent | null => {
+      if (node.type === 'terminal') {
+        return node.sessionId === sessionId ? null : node;
+      }
+      const newPanels: TerminalPanelContent[] = [];
+      for (const panel of node.panels) {
+        const result = removeAndCollapse(panel);
+        if (result !== null) newPanels.push(result);
+      }
+      if (newPanels.length === 0) return null;
+      if (newPanels.length === 1) return newPanels[0];
+      // Normalize sizes to sum to 100%
+      const totalSize = newPanels.reduce((sum, p) => sum + (p.size || 0), 0);
+      const normalizedPanels =
+        totalSize > 0
+          ? newPanels.map((p) => ({ ...p, size: ((p.size || 0) / totalSize) * 100 }))
+          : newPanels.map((p) => ({ ...p, size: 100 / newPanels.length }));
+      return { ...node, panels: normalizedPanels };
+    };
+
+    const newSourceLayout = removeAndCollapse(sourceTab.layout);
+
+    let finalTargetTabId = targetTabId;
+    let newTabs = current.tabs;
+
+    if (targetTabId === 'new') {
+      const newTabId = `tab-${Date.now()}`;
+      const sourceWillBeRemoved = !newSourceLayout;
+      const tabName = sourceWillBeRemoved ? sourceTab.name : `Terminal ${current.tabs.length + 1}`;
+      newTabs = [
+        ...current.tabs,
+        {
+          id: newTabId,
+          name: tabName,
+          layout: {
+            type: 'terminal',
+            sessionId,
+            size: 100,
+            fontSize: originalTerminalNode.fontSize,
+          },
+        },
+      ];
+      finalTargetTabId = newTabId;
+    } else {
+      const targetTab = current.tabs.find((t) => t.id === targetTabId);
+      if (!targetTab) return;
+
+      const terminalNode: TerminalPanelContent = {
+        type: 'terminal',
+        sessionId,
+        size: 50,
+        fontSize: originalTerminalNode.fontSize,
+      };
+      let newTargetLayout: TerminalPanelContent;
+
+      if (!targetTab.layout) {
+        newTargetLayout = {
+          type: 'terminal',
+          sessionId,
+          size: 100,
+          fontSize: originalTerminalNode.fontSize,
+        };
+      } else if (targetTab.layout.type === 'terminal') {
+        newTargetLayout = {
+          type: 'split',
+          id: generateSplitId(),
+          direction: 'horizontal',
+          panels: [{ ...targetTab.layout, size: 50 }, terminalNode],
+        };
+      } else {
+        newTargetLayout = {
+          ...targetTab.layout,
+          panels: [...targetTab.layout.panels, terminalNode],
+        };
+      }
+
+      newTabs = current.tabs.map((t) =>
+        t.id === targetTabId ? { ...t, layout: newTargetLayout } : t
+      );
+    }
+
+    if (!newSourceLayout) {
+      newTabs = newTabs.filter((t) => t.id !== sourceTabId);
+    } else {
+      newTabs = newTabs.map((t) => (t.id === sourceTabId ? { ...t, layout: newSourceLayout } : t));
+    }
+
+    set({
+      terminalState: {
+        ...current,
+        tabs: newTabs,
+        activeTabId: finalTargetTabId,
+        activeSessionId: sessionId,
+      },
+    });
+  },
+
+  addTerminalToTab: (sessionId, tabId, direction = 'horizontal') => {
+    const current = get().terminalState;
+    const tab = current.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    const terminalNode: TerminalPanelContent = {
+      type: 'terminal',
+      sessionId,
+      size: 50,
+    };
+    let newLayout: TerminalPanelContent;
+
+    if (!tab.layout) {
+      newLayout = { type: 'terminal', sessionId, size: 100 };
+    } else if (tab.layout.type === 'terminal') {
+      newLayout = {
+        type: 'split',
+        id: generateSplitId(),
+        direction,
+        panels: [{ ...tab.layout, size: 50 }, terminalNode],
+      };
+    } else {
+      if (tab.layout.direction === direction) {
+        const newSize = 100 / (tab.layout.panels.length + 1);
+        newLayout = {
+          ...tab.layout,
+          panels: [
+            ...tab.layout.panels.map((p) => ({ ...p, size: newSize })),
+            { ...terminalNode, size: newSize },
+          ],
+        };
+      } else {
+        newLayout = {
+          type: 'split',
+          id: generateSplitId(),
+          direction,
+          panels: [{ ...tab.layout, size: 50 }, terminalNode],
+        };
+      }
+    }
+
+    const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, layout: newLayout } : t));
+
+    set({
+      terminalState: {
+        ...current,
+        tabs: newTabs,
+        activeTabId: tabId,
+        activeSessionId: sessionId,
+      },
+    });
+  },
+
+  setTerminalTabLayout: (tabId, layout, activeSessionId) => {
+    const current = get().terminalState;
+    const tab = current.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+
+    const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, layout } : t));
+
+    // Find first terminal in layout if no activeSessionId provided
+    const findFirst = (node: TerminalPanelContent): string | null => {
+      if (node.type === 'terminal') return node.sessionId;
+      for (const p of node.panels) {
+        const found = findFirst(p);
+        if (found) return found;
+      }
+      return null;
+    };
+
+    const newActiveSessionId = activeSessionId || findFirst(layout);
+
+    set({
+      terminalState: {
+        ...current,
+        tabs: newTabs,
+        activeTabId: tabId,
+        activeSessionId: newActiveSessionId,
+      },
+    });
+  },
+
+  updateTerminalPanelSizes: (tabId, panelKeys, sizes) => {
+    const current = get().terminalState;
+    const tab = current.tabs.find((t) => t.id === tabId);
+    if (!tab || !tab.layout) return;
+
+    // Create a map of panel key to new size
+    const sizeMap = new Map<string, number>();
+    panelKeys.forEach((key, index) => {
+      sizeMap.set(key, sizes[index]);
+    });
+
+    // Helper to generate panel key (matches getPanelKey in terminal-view.tsx)
+    const getPanelKey = (panel: TerminalPanelContent): string => {
+      if (panel.type === 'terminal') return panel.sessionId;
+      const childKeys = panel.panels.map(getPanelKey).join('-');
+      return `split-${panel.direction}-${childKeys}`;
+    };
+
+    // Recursively update sizes in the layout
+    const updateSizes = (panel: TerminalPanelContent): TerminalPanelContent => {
+      const key = getPanelKey(panel);
+      const newSize = sizeMap.get(key);
+
+      if (panel.type === 'terminal') {
+        return newSize !== undefined ? { ...panel, size: newSize } : panel;
+      }
+
+      return {
+        ...panel,
+        size: newSize !== undefined ? newSize : panel.size,
+        panels: panel.panels.map(updateSizes),
+      };
+    };
+
+    const updatedLayout = updateSizes(tab.layout);
+
+    const newTabs = current.tabs.map((t) => (t.id === tabId ? { ...t, layout: updatedLayout } : t));
+
+    set({
+      terminalState: { ...current, tabs: newTabs },
+    });
+  },
+
+  // Convert runtime layout to persisted format (preserves sessionIds for reconnection)
+  saveTerminalLayout: (projectPath) => {
+    const current = get().terminalState;
+    if (current.tabs.length === 0) {
+      // Nothing to save, clear any existing layout
+      const next = { ...get().terminalLayoutByProject };
+      delete next[projectPath];
+      set({ terminalLayoutByProject: next });
+      return;
+    }
+
+    // Convert TerminalPanelContent to PersistedTerminalPanel
+    // Now preserves sessionId so we can reconnect when switching back
+    const persistPanel = (panel: TerminalPanelContent): PersistedTerminalPanel => {
+      if (panel.type === 'terminal') {
+        return {
+          type: 'terminal',
+          size: panel.size,
+          fontSize: panel.fontSize,
+          sessionId: panel.sessionId, // Preserve for reconnection
+        };
+      }
+      return {
+        type: 'split',
+        id: panel.id, // Preserve stable ID
+        direction: panel.direction,
+        panels: panel.panels.map(persistPanel),
+        size: panel.size,
+      };
+    };
+
+    const persistedTabs: PersistedTerminalTab[] = current.tabs.map((tab) => ({
+      id: tab.id,
+      name: tab.name,
+      layout: tab.layout ? persistPanel(tab.layout) : null,
+    }));
+
+    const activeTabIndex = current.tabs.findIndex((t) => t.id === current.activeTabId);
+
+    const persisted: PersistedTerminalState = {
+      tabs: persistedTabs,
+      activeTabIndex: activeTabIndex >= 0 ? activeTabIndex : 0,
+      defaultFontSize: current.defaultFontSize,
+      defaultRunScript: current.defaultRunScript,
+      screenReaderMode: current.screenReaderMode,
+      fontFamily: current.fontFamily,
+      scrollbackLines: current.scrollbackLines,
+      lineHeight: current.lineHeight,
+    };
+
+    set({
+      terminalLayoutByProject: {
+        ...get().terminalLayoutByProject,
+        [projectPath]: persisted,
+      },
+    });
+  },
+
+  getPersistedTerminalLayout: (projectPath) => {
+    return get().terminalLayoutByProject[projectPath] || null;
+  },
+
+  clearPersistedTerminalLayout: (projectPath) => {
+    const next = { ...get().terminalLayoutByProject };
+    delete next[projectPath];
+    set({ terminalLayoutByProject: next });
+  },
+
+  // Spec Creation actions
+  setSpecCreatingForProject: (projectPath) => {
+    set({ specCreatingForProject: projectPath });
+  },
+
+  isSpecCreatingForProject: (projectPath) => {
+    return get().specCreatingForProject === projectPath;
+  },
+
+  setDefaultPlanningMode: (mode) => set({ defaultPlanningMode: mode }),
+  setDefaultRequirePlanApproval: (require) => set({ defaultRequirePlanApproval: require }),
+  setDefaultFeatureModel: (entry) => set({ defaultFeatureModel: entry }),
+
+  // Plan Approval actions
+  setPendingPlanApproval: (approval) => set({ pendingPlanApproval: approval }),
+
+  // Claude Usage Tracking actions
+  setClaudeRefreshInterval: (interval: number) => set({ claudeRefreshInterval: interval }),
+  setClaudeUsageLastUpdated: (timestamp: number) => set({ claudeUsageLastUpdated: timestamp }),
+  setClaudeUsage: (usage: ClaudeUsage | null) =>
+    set({
+      claudeUsage: usage,
+      claudeUsageLastUpdated: usage ? Date.now() : null,
+    }),
+
+  // Codex Usage Tracking actions
+  setCodexUsage: (usage: CodexUsage | null) =>
+    set({
+      codexUsage: usage,
+      codexUsageLastUpdated: usage ? Date.now() : null,
+    }),
+
+  // Codex Models actions
+  fetchCodexModels: async (forceRefresh = false) => {
+    const FAILURE_COOLDOWN_MS = 30 * 1000; // 30 seconds
+    const SUCCESS_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+
+    const { codexModelsLastFetched, codexModelsLoading, codexModelsLastFailedAt } = get();
+
+    // Skip if already loading
+    if (codexModelsLoading) return;
+
+    // Skip if recently failed and not forcing refresh
+    if (
+      !forceRefresh &&
+      codexModelsLastFailedAt &&
+      Date.now() - codexModelsLastFailedAt < FAILURE_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    // Skip if recently fetched successfully and not forcing refresh
+    if (
+      !forceRefresh &&
+      codexModelsLastFetched &&
+      Date.now() - codexModelsLastFetched < SUCCESS_CACHE_MS
+    ) {
+      return;
+    }
+
+    set({ codexModelsLoading: true, codexModelsError: null });
+
+    try {
+      const api = getElectronAPI();
+      if (!api.codex) {
+        throw new Error('Codex API not available');
+      }
+
+      const result = await api.codex.getModels(forceRefresh);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fetch Codex models');
+      }
+
+      set({
+        codexModels: result.models || [],
+        codexModelsLastFetched: Date.now(),
+        codexModelsLoading: false,
+        codexModelsError: null,
+        codexModelsLastFailedAt: null, // Clear failure on success
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      set({
+        codexModelsError: errorMessage,
+        codexModelsLoading: false,
+        codexModelsLastFailedAt: Date.now(), // Record failure time for cooldown
+      });
+    }
+  },
+
+  setCodexModels: (models) =>
+    set({
+      codexModels: models,
+      codexModelsLastFetched: Date.now(),
+    }),
+
+  // OpenCode Models actions
+  fetchOpencodeModels: async (forceRefresh = false) => {
+    const FAILURE_COOLDOWN_MS = 30 * 1000; // 30 seconds
+    const SUCCESS_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+
+    const { opencodeModelsLastFetched, opencodeModelsLoading, opencodeModelsLastFailedAt } = get();
+
+    // Skip if already loading
+    if (opencodeModelsLoading) return;
+
+    // Skip if recently failed and not forcing refresh
+    if (
+      !forceRefresh &&
+      opencodeModelsLastFailedAt &&
+      Date.now() - opencodeModelsLastFailedAt < FAILURE_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    // Skip if recently fetched successfully and not forcing refresh
+    if (
+      !forceRefresh &&
+      opencodeModelsLastFetched &&
+      Date.now() - opencodeModelsLastFetched < SUCCESS_CACHE_MS
+    ) {
+      return;
+    }
+
+    set({ opencodeModelsLoading: true, opencodeModelsError: null });
+
+    try {
+      const api = getElectronAPI();
+      if (!api.setup) {
+        throw new Error('Setup API not available');
+      }
+
+      const result = await api.setup.getOpencodeModels(forceRefresh);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to fetch OpenCode models');
+      }
+
+      set({
+        dynamicOpencodeModels: result.models || [],
+        opencodeModelsLastFetched: Date.now(),
+        opencodeModelsLoading: false,
+        opencodeModelsError: null,
+        opencodeModelsLastFailedAt: null, // Clear failure on success
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      set({
+        opencodeModelsError: errorMessage,
+        opencodeModelsLoading: false,
+        opencodeModelsLastFailedAt: Date.now(), // Record failure time for cooldown
+      });
+    }
+  },
+
+  // Pipeline actions
+  setPipelineConfig: (projectPath, config) => {
+    set({
+      pipelineConfigByProject: {
+        ...get().pipelineConfigByProject,
+        [projectPath]: config,
+      },
+    });
+  },
+
+  getPipelineConfig: (projectPath) => {
+    return get().pipelineConfigByProject[projectPath] || null;
+  },
+
+  addPipelineStep: (projectPath, step) => {
+    const config = get().pipelineConfigByProject[projectPath] || { version: 1, steps: [] };
+    const now = new Date().toISOString();
+    const newStep: PipelineStep = {
+      ...step,
+      id: `step_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const newSteps = [...config.steps, newStep].sort((a, b) => a.order - b.order);
+    newSteps.forEach((s, index) => {
+      s.order = index;
+    });
+
+    set({
+      pipelineConfigByProject: {
+        ...get().pipelineConfigByProject,
+        [projectPath]: { ...config, steps: newSteps },
+      },
+    });
+
+    return newStep;
+  },
+
+  updatePipelineStep: (projectPath, stepId, updates) => {
+    const config = get().pipelineConfigByProject[projectPath];
+    if (!config) return;
+
+    const stepIndex = config.steps.findIndex((s) => s.id === stepId);
+    if (stepIndex === -1) return;
+
+    const updatedSteps = [...config.steps];
+    updatedSteps[stepIndex] = {
+      ...updatedSteps[stepIndex],
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    set({
+      pipelineConfigByProject: {
+        ...get().pipelineConfigByProject,
+        [projectPath]: { ...config, steps: updatedSteps },
+      },
+    });
+  },
+
+  deletePipelineStep: (projectPath, stepId) => {
+    const config = get().pipelineConfigByProject[projectPath];
+    if (!config) return;
+
+    const newSteps = config.steps.filter((s) => s.id !== stepId);
+    newSteps.forEach((s, index) => {
+      s.order = index;
+    });
+
+    set({
+      pipelineConfigByProject: {
+        ...get().pipelineConfigByProject,
+        [projectPath]: { ...config, steps: newSteps },
+      },
+    });
+  },
+
+  reorderPipelineSteps: (projectPath, stepIds) => {
+    const config = get().pipelineConfigByProject[projectPath];
+    if (!config) return;
+
+    const stepMap = new Map(config.steps.map((s) => [s.id, s]));
+    const reorderedSteps = stepIds
+      .map((id, index) => {
+        const step = stepMap.get(id);
+        if (!step) return null;
+        return { ...step, order: index, updatedAt: new Date().toISOString() };
+      })
+      .filter((s): s is PipelineStep => s !== null);
+
+    set({
+      pipelineConfigByProject: {
+        ...get().pipelineConfigByProject,
+        [projectPath]: { ...config, steps: reorderedSteps },
+      },
+    });
+  },
+
+  // Worktree Panel Visibility actions (per-project)
+  setWorktreePanelVisible: (projectPath, visible) => {
+    set({
+      worktreePanelVisibleByProject: {
+        ...get().worktreePanelVisibleByProject,
+        [projectPath]: visible,
+      },
+    });
+  },
+
+  getWorktreePanelVisible: (projectPath) => {
+    // Default to true (visible) if not set
+    return get().worktreePanelVisibleByProject[projectPath] ?? true;
+  },
+
+  // Init Script Indicator Visibility actions (per-project)
+  setShowInitScriptIndicator: (projectPath, visible) => {
+    set({
+      showInitScriptIndicatorByProject: {
+        ...get().showInitScriptIndicatorByProject,
+        [projectPath]: visible,
+      },
+    });
+  },
+
+  getShowInitScriptIndicator: (projectPath) => {
+    // Default to true (visible) if not set
+    return get().showInitScriptIndicatorByProject[projectPath] ?? true;
+  },
+
+  // Default Delete Branch actions (per-project)
+  setDefaultDeleteBranch: (projectPath, deleteBranch) => {
+    set({
+      defaultDeleteBranchByProject: {
+        ...get().defaultDeleteBranchByProject,
+        [projectPath]: deleteBranch,
+      },
+    });
+  },
+
+  getDefaultDeleteBranch: (projectPath) => {
+    // Default to false (don't delete branch) if not set
+    return get().defaultDeleteBranchByProject[projectPath] ?? false;
+  },
+
+  // Auto-dismiss Init Script Indicator actions (per-project)
+  setAutoDismissInitScriptIndicator: (projectPath, autoDismiss) => {
+    set({
+      autoDismissInitScriptIndicatorByProject: {
+        ...get().autoDismissInitScriptIndicatorByProject,
+        [projectPath]: autoDismiss,
+      },
+    });
+  },
+
+  getAutoDismissInitScriptIndicator: (projectPath) => {
+    // Default to true (auto-dismiss enabled) if not set
+    return get().autoDismissInitScriptIndicatorByProject[projectPath] ?? true;
+  },
+
+  // UI State actions (previously in localStorage, now synced via API)
+  setWorktreePanelCollapsed: (collapsed) => set({ worktreePanelCollapsed: collapsed }),
+  setLastProjectDir: (dir) => set({ lastProjectDir: dir }),
+  setRecentFolders: (folders) => set({ recentFolders: folders }),
+  addRecentFolder: (folder) => {
+    const current = get().recentFolders;
+    // Remove if already exists, then add to front
+    const filtered = current.filter((f) => f !== folder);
+    // Keep max 10 recent folders
+    const updated = [folder, ...filtered].slice(0, 10);
+    set({ recentFolders: updated });
+  },
+
+  // Init Script State actions (keyed by "projectPath::branch")
+  setInitScriptState: (projectPath, branch, state) => {
+    const key = `${projectPath}::${branch}`;
+    const current = get().initScriptState[key] || {
+      status: 'idle',
+      branch,
+      output: [],
+    };
+    set({
+      initScriptState: {
+        ...get().initScriptState,
+        [key]: { ...current, ...state },
+      },
+    });
+  },
+
+  appendInitScriptOutput: (projectPath, branch, content) => {
+    const key = `${projectPath}::${branch}`;
+    // Initialize state if absent to avoid dropping output due to event-order races
+    const current = get().initScriptState[key] || {
+      status: 'idle' as const,
+      branch,
+      output: [],
+    };
+    // Append new content and enforce fixed-size buffer to prevent memory bloat
+    const newOutput = [...current.output, content].slice(-MAX_INIT_OUTPUT_LINES);
+    set({
+      initScriptState: {
+        ...get().initScriptState,
+        [key]: {
+          ...current,
+          output: newOutput,
+        },
+      },
+    });
+  },
+
+  clearInitScriptState: (projectPath, branch) => {
+    const key = `${projectPath}::${branch}`;
+    const { [key]: _, ...rest } = get().initScriptState;
+    set({ initScriptState: rest });
+  },
+
+  getInitScriptState: (projectPath, branch) => {
+    const key = `${projectPath}::${branch}`;
+    return get().initScriptState[key] || null;
+  },
+
+  getInitScriptStatesForProject: (projectPath) => {
+    const prefix = `${projectPath}::`;
+    const states = get().initScriptState;
+    return Object.entries(states)
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, state]) => ({ key, state }));
+  },
+
+  // Reset
+  reset: () => set(initialState),
+}));

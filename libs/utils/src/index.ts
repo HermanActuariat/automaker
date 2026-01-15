@@ -8,6 +8,9 @@ export {
   isAbortError,
   isCancellationError,
   isAuthenticationError,
+  isRateLimitError,
+  isQuotaExhaustedError,
+  extractRetryAfter,
   classifyError,
   getUserFriendlyErrorMessage,
   getErrorMessage,
@@ -37,7 +40,15 @@ export {
 } from './prompt-builder.js';
 
 // Logger
-export { createLogger, getLogLevel, setLogLevel, LogLevel } from './logger.js';
+export {
+  createLogger,
+  getLogLevel,
+  setLogLevel,
+  setColorsEnabled,
+  setTimestampsEnabled,
+  LogLevel,
+  type Logger,
+} from './logger.js';
 
 // File system utilities
 export { mkdirSafe, existsSafe } from './fs-utils.js';
@@ -52,5 +63,31 @@ export {
   type ContextMetadata,
   type ContextFileInfo,
   type ContextFilesResult,
+  type ContextFsModule,
   type LoadContextFilesOptions,
+  type MemoryFileInfo,
+  type TaskContext,
 } from './context-loader.js';
+
+// Memory loading
+export {
+  loadRelevantMemory,
+  initializeMemoryFolder,
+  appendLearning,
+  recordMemoryUsage,
+  getMemoryDir,
+  parseFrontmatter,
+  serializeFrontmatter,
+  extractTerms,
+  calculateUsageScore,
+  countMatches,
+  incrementUsageStat,
+  formatLearning,
+  type MemoryFsModule,
+  type MemoryMetadata,
+  type MemoryFile,
+  type MemoryLoadResult,
+  type UsageStats,
+  type LearningEntry,
+  type SimpleMemoryFile,
+} from './memory-loader.js';

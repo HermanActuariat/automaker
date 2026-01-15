@@ -2,6 +2,8 @@
  * Electron API type definitions
  */
 
+import type { ClaudeUsageResponse, CodexUsageResponse } from '@/store/app-store';
+
 export interface ImageAttachment {
   id?: string; // Optional - may not be present in messages loaded from server
   data: string; // base64 encoded image data
@@ -85,7 +87,8 @@ export interface AgentAPI {
     message: string,
     workingDirectory?: string,
     imagePaths?: string[],
-    model?: string
+    model?: string,
+    thinkingLevel?: string
   ) => Promise<{
     success: boolean;
     error?: string;
@@ -297,6 +300,17 @@ export type AutoModeEvent =
       featureId: string;
       projectPath?: string;
       phaseNumber: number;
+    }
+  | {
+      type: 'auto_mode_resuming_features';
+      message: string;
+      projectPath?: string;
+      featureIds: string[];
+      features: Array<{
+        id: string;
+        title?: string;
+        status?: string;
+      }>;
     };
 
 export type SpecRegenerationEvent =
@@ -353,15 +367,16 @@ export interface SpecRegenerationAPI {
     error?: string;
   }>;
 
-  stop: () => Promise<{
+  stop: (projectPath?: string) => Promise<{
     success: boolean;
     error?: string;
   }>;
 
-  status: () => Promise<{
+  status: (projectPath?: string) => Promise<{
     success: boolean;
     isRunning?: boolean;
     currentPhase?: string;
+    projectPath?: string;
     error?: string;
   }>;
 
@@ -463,7 +478,13 @@ export interface AutoModeAPI {
 }
 
 export interface ElectronAPI {
+  // Platform info (exposed from preload)
+  platform?: 'darwin' | 'win32' | 'linux';
+  isElectron?: boolean;
+
   ping: () => Promise<string>;
+  getApiKey?: () => Promise<string | null>;
+  quit?: () => Promise<void>;
   openExternalLink: (url: string) => Promise<{ success: boolean; error?: string }>;
 
   // Dialog APIs
@@ -581,6 +602,16 @@ export interface ElectronAPI {
     error?: string;
   }>;
 
+  // Claude Usage API
+  claude: {
+    getUsage: () => Promise<ClaudeUsageResponse>;
+  };
+
+  // Codex Usage API
+  codex: {
+    getUsage: () => Promise<CodexUsageResponse>;
+  };
+
   // Worktree Management APIs
   worktree: WorktreeAPI;
 
@@ -629,14 +660,14 @@ export interface FileDiffResult {
 }
 
 export interface WorktreeAPI {
-  // Merge feature worktree changes back to main branch
+  // Merge worktree branch into main and clean up
   mergeFeature: (
     projectPath: string,
-    featureId: string,
+    branchName: string,
+    worktreePath: string,
     options?: {
       squash?: boolean;
-      commitMessage?: string;
-      squashMessage?: string;
+      message?: string;
     }
   ) => Promise<{
     success: boolean;
@@ -739,6 +770,13 @@ export interface WorktreeAPI {
     error?: string;
   }>;
 
+  // Generate an AI commit message from git diff
+  generateCommitMessage: (worktreePath: string) => Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+  }>;
+
   // Push a worktree branch to remote
   push: (
     worktreePath: string,
@@ -820,8 +858,11 @@ export interface WorktreeAPI {
     code?: 'NOT_GIT_REPO' | 'NO_COMMITS';
   }>;
 
-  // List all local branches
-  listBranches: (worktreePath: string) => Promise<{
+  // List branches (local and optionally remote)
+  listBranches: (
+    worktreePath: string,
+    includeRemote?: boolean
+  ) => Promise<{
     success: boolean;
     result?: {
       currentBranch: string;
@@ -853,7 +894,10 @@ export interface WorktreeAPI {
   }>;
 
   // Open a worktree directory in the editor
-  openInEditor: (worktreePath: string) => Promise<{
+  openInEditor: (
+    worktreePath: string,
+    editorCommand?: string
+  ) => Promise<{
     success: boolean;
     result?: {
       message: string;
@@ -872,6 +916,30 @@ export interface WorktreeAPI {
     error?: string;
   }>;
 
+  // Get all available code editors
+  getAvailableEditors: () => Promise<{
+    success: boolean;
+    result?: {
+      editors: Array<{
+        name: string;
+        command: string;
+      }>;
+    };
+    error?: string;
+  }>;
+
+  // Refresh editor cache and re-detect available editors
+  refreshEditors: () => Promise<{
+    success: boolean;
+    result?: {
+      editors: Array<{
+        name: string;
+        command: string;
+      }>;
+      message: string;
+    };
+    error?: string;
+  }>;
   // Initialize git repository in a project
   initGit: (projectPath: string) => Promise<{
     success: boolean;
@@ -920,6 +988,43 @@ export interface WorktreeAPI {
     error?: string;
   }>;
 
+  // Get buffered logs for a dev server
+  getDevServerLogs: (worktreePath: string) => Promise<{
+    success: boolean;
+    result?: {
+      worktreePath: string;
+      port: number;
+      logs: string;
+      startedAt: string;
+    };
+    error?: string;
+  }>;
+
+  // Subscribe to dev server log events (started, output, stopped)
+  onDevServerLogEvent: (
+    callback: (
+      event:
+        | {
+            type: 'dev-server:started';
+            payload: { worktreePath: string; port: number; url: string; timestamp: string };
+          }
+        | {
+            type: 'dev-server:output';
+            payload: { worktreePath: string; content: string; timestamp: string };
+          }
+        | {
+            type: 'dev-server:stopped';
+            payload: {
+              worktreePath: string;
+              port: number;
+              exitCode: number | null;
+              error?: string;
+              timestamp: string;
+            };
+          }
+    ) => void
+  ) => () => void;
+
   // Get PR info and comments for a branch
   getPRInfo: (
     worktreePath: string,
@@ -957,6 +1062,50 @@ export interface WorktreeAPI {
     };
     error?: string;
   }>;
+
+  // Get init script content for a project
+  getInitScript: (projectPath: string) => Promise<{
+    success: boolean;
+    exists: boolean;
+    content: string;
+    path: string;
+    error?: string;
+  }>;
+
+  // Set init script content for a project
+  setInitScript: (
+    projectPath: string,
+    content: string
+  ) => Promise<{
+    success: boolean;
+    path?: string;
+    error?: string;
+  }>;
+
+  // Delete init script for a project
+  deleteInitScript: (projectPath: string) => Promise<{
+    success: boolean;
+    error?: string;
+  }>;
+
+  // Run (or re-run) init script for a worktree
+  runInitScript: (
+    projectPath: string,
+    worktreePath: string,
+    branch: string
+  ) => Promise<{
+    success: boolean;
+    message?: string;
+    error?: string;
+  }>;
+
+  // Subscribe to init script events
+  onInitScriptEvent: (
+    callback: (event: {
+      type: 'worktree:init-started' | 'worktree:init-output' | 'worktree:init-completed';
+      payload: unknown;
+    }) => void
+  ) => () => void;
 }
 
 export interface GitAPI {

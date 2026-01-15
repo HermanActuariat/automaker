@@ -12,6 +12,8 @@ describe('claude-provider.ts', () => {
     vi.clearAllMocks();
     provider = new ClaudeProvider();
     delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
   });
 
   describe('getName', () => {
@@ -37,6 +39,7 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: 'Hello',
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
       });
 
@@ -73,12 +76,13 @@ describe('claude-provider.ts', () => {
           maxTurns: 10,
           cwd: '/test/dir',
           allowedTools: ['Read', 'Write'],
-          permissionMode: 'default',
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
         }),
       });
     });
 
-    it('should use default allowed tools when not specified', async () => {
+    it('should not include allowedTools when not specified (caller decides via sdk-options)', async () => {
       vi.mocked(sdk.query).mockReturnValue(
         (async function* () {
           yield { type: 'text', text: 'test' };
@@ -87,6 +91,7 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: 'Test',
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
       });
 
@@ -94,37 +99,8 @@ describe('claude-provider.ts', () => {
 
       expect(sdk.query).toHaveBeenCalledWith({
         prompt: 'Test',
-        options: expect.objectContaining({
-          allowedTools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'],
-        }),
-      });
-    });
-
-    it('should pass sandbox configuration when provided', async () => {
-      vi.mocked(sdk.query).mockReturnValue(
-        (async function* () {
-          yield { type: 'text', text: 'test' };
-        })()
-      );
-
-      const generator = provider.executeQuery({
-        prompt: 'Test',
-        cwd: '/test',
-        sandbox: {
-          enabled: true,
-          autoAllowBashIfSandboxed: true,
-        },
-      });
-
-      await collectAsyncGenerator(generator);
-
-      expect(sdk.query).toHaveBeenCalledWith({
-        prompt: 'Test',
-        options: expect.objectContaining({
-          sandbox: {
-            enabled: true,
-            autoAllowBashIfSandboxed: true,
-          },
+        options: expect.not.objectContaining({
+          allowedTools: expect.anything(),
         }),
       });
     });
@@ -140,6 +116,7 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: 'Test',
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
         abortController,
       });
@@ -168,6 +145,7 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: 'Current message',
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
         conversationHistory,
         sdkSessionId: 'test-session-id',
@@ -198,6 +176,7 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: arrayPrompt as any,
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
       });
 
@@ -217,6 +196,7 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: 'Test',
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
       });
 
@@ -242,24 +222,23 @@ describe('claude-provider.ts', () => {
 
       const generator = provider.executeQuery({
         prompt: 'Test',
+        model: 'claude-opus-4-5-20251101',
         cwd: '/test',
       });
 
       await expect(collectAsyncGenerator(generator)).rejects.toThrow('SDK execution failed');
 
-      // Should log error message
-      expect(consoleErrorSpy).toHaveBeenNthCalledWith(
-        1,
-        '[ClaudeProvider] ERROR: executeQuery() error during execution:',
-        testError
-      );
-
-      // Should log stack trace
-      expect(consoleErrorSpy).toHaveBeenNthCalledWith(
-        2,
-        '[ClaudeProvider] ERROR stack:',
-        testError.stack
-      );
+      // Should log error with classification info (via logger)
+      // Logger format: 'ERROR [Context]' message, data
+      const errorCall = consoleErrorSpy.mock.calls[0];
+      expect(errorCall[0]).toMatch(/ERROR.*\[ClaudeProvider\]/);
+      expect(errorCall[1]).toBe('executeQuery() error during execution:');
+      expect(errorCall[2]).toMatchObject({
+        type: expect.any(String),
+        message: 'SDK execution failed',
+        isRateLimit: false,
+        stack: expect.stringContaining('Error: SDK execution failed'),
+      });
 
       consoleErrorSpy.mockRestore();
     });
@@ -287,6 +266,93 @@ describe('claude-provider.ts', () => {
 
       expect(result.hasApiKey).toBe(false);
       expect(result.authenticated).toBe(false);
+    });
+  });
+
+  describe('environment variable passthrough', () => {
+    afterEach(() => {
+      delete process.env.ANTHROPIC_BASE_URL;
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+    });
+
+    it('should pass ANTHROPIC_BASE_URL to SDK env', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://custom.example.com/v1';
+
+      vi.mocked(sdk.query).mockReturnValue(
+        (async function* () {
+          yield { type: 'text', text: 'test' };
+        })()
+      );
+
+      const generator = provider.executeQuery({
+        prompt: 'Test',
+        cwd: '/test',
+      });
+
+      await collectAsyncGenerator(generator);
+
+      expect(sdk.query).toHaveBeenCalledWith({
+        prompt: 'Test',
+        options: expect.objectContaining({
+          env: expect.objectContaining({
+            ANTHROPIC_BASE_URL: 'https://custom.example.com/v1',
+          }),
+        }),
+      });
+    });
+
+    it('should pass ANTHROPIC_AUTH_TOKEN to SDK env', async () => {
+      process.env.ANTHROPIC_AUTH_TOKEN = 'custom-auth-token';
+
+      vi.mocked(sdk.query).mockReturnValue(
+        (async function* () {
+          yield { type: 'text', text: 'test' };
+        })()
+      );
+
+      const generator = provider.executeQuery({
+        prompt: 'Test',
+        cwd: '/test',
+      });
+
+      await collectAsyncGenerator(generator);
+
+      expect(sdk.query).toHaveBeenCalledWith({
+        prompt: 'Test',
+        options: expect.objectContaining({
+          env: expect.objectContaining({
+            ANTHROPIC_AUTH_TOKEN: 'custom-auth-token',
+          }),
+        }),
+      });
+    });
+
+    it('should pass both custom endpoint vars together', async () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://gateway.example.com';
+      process.env.ANTHROPIC_AUTH_TOKEN = 'gateway-token';
+
+      vi.mocked(sdk.query).mockReturnValue(
+        (async function* () {
+          yield { type: 'text', text: 'test' };
+        })()
+      );
+
+      const generator = provider.executeQuery({
+        prompt: 'Test',
+        cwd: '/test',
+      });
+
+      await collectAsyncGenerator(generator);
+
+      expect(sdk.query).toHaveBeenCalledWith({
+        prompt: 'Test',
+        options: expect.objectContaining({
+          env: expect.objectContaining({
+            ANTHROPIC_BASE_URL: 'https://gateway.example.com',
+            ANTHROPIC_AUTH_TOKEN: 'gateway-token',
+          }),
+        }),
+      });
     });
   });
 

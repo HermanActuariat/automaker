@@ -7,12 +7,44 @@
 
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { BaseProvider } from './base-provider.js';
+import { classifyError, getUserFriendlyErrorMessage, createLogger } from '@automaker/utils';
+
+const logger = createLogger('ClaudeProvider');
+import { getThinkingTokenBudget, validateBareModelId } from '@automaker/types';
 import type {
   ExecuteOptions,
   ProviderMessage,
   InstallationStatus,
   ModelDefinition,
 } from './types.js';
+
+// Explicit allowlist of environment variables to pass to the SDK.
+// Only these vars are passed - nothing else from process.env leaks through.
+const ALLOWED_ENV_VARS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+  'PATH',
+  'HOME',
+  'SHELL',
+  'TERM',
+  'USER',
+  'LANG',
+  'LC_ALL',
+];
+
+/**
+ * Build environment for the SDK with only explicitly allowed variables
+ */
+function buildEnv(): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const key of ALLOWED_ENV_VARS) {
+    if (process.env[key]) {
+      env[key] = process.env[key];
+    }
+  }
+  return env;
+}
 
 export class ClaudeProvider extends BaseProvider {
   getName(): string {
@@ -23,6 +55,10 @@ export class ClaudeProvider extends BaseProvider {
    * Execute a query using Claude Agent SDK
    */
   async *executeQuery(options: ExecuteOptions): AsyncGenerator<ProviderMessage> {
+    // Validate that model doesn't have a provider prefix
+    // AgentService should strip prefixes before passing to providers
+    validateBareModelId(options.model, 'ClaudeProvider');
+
     const {
       prompt,
       model,
@@ -33,19 +69,25 @@ export class ClaudeProvider extends BaseProvider {
       abortController,
       conversationHistory,
       sdkSessionId,
+      thinkingLevel,
     } = options;
 
-    // Build Claude SDK options
-    const defaultTools = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'];
-    const toolsToUse = allowedTools || defaultTools;
+    // Convert thinking level to token budget
+    const maxThinkingTokens = getThinkingTokenBudget(thinkingLevel);
 
+    // Build Claude SDK options
     const sdkOptions: Options = {
       model,
       systemPrompt,
       maxTurns,
       cwd,
-      allowedTools: toolsToUse,
-      permissionMode: 'default',
+      // Pass only explicitly allowed environment variables to SDK
+      env: buildEnv(),
+      // Pass through allowedTools if provided by caller (decided by sdk-options.ts)
+      ...(allowedTools && { allowedTools }),
+      // AUTONOMOUS MODE: Always bypass permissions for fully autonomous operation
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
       abortController,
       // Resume existing SDK session if we have a session ID
       ...(sdkSessionId && conversationHistory && conversationHistory.length > 0
@@ -53,8 +95,14 @@ export class ClaudeProvider extends BaseProvider {
         : {}),
       // Forward settingSources for CLAUDE.md file loading
       ...(options.settingSources && { settingSources: options.settingSources }),
-      // Forward sandbox configuration
-      ...(options.sandbox && { sandbox: options.sandbox }),
+      // Forward MCP servers configuration
+      ...(options.mcpServers && { mcpServers: options.mcpServers }),
+      // Extended thinking configuration
+      ...(maxThinkingTokens && { maxThinkingTokens }),
+      // Subagents configuration for specialized task delegation
+      ...(options.agents && { agents: options.agents }),
+      // Pass through outputFormat for structured JSON outputs
+      ...(options.outputFormat && { outputFormat: options.outputFormat }),
     };
 
     // Build prompt payload
@@ -88,9 +136,32 @@ export class ClaudeProvider extends BaseProvider {
         yield msg as ProviderMessage;
       }
     } catch (error) {
-      console.error('[ClaudeProvider] ERROR: executeQuery() error during execution:', error);
-      console.error('[ClaudeProvider] ERROR stack:', (error as Error).stack);
-      throw error;
+      // Enhance error with user-friendly message and classification
+      const errorInfo = classifyError(error);
+      const userMessage = getUserFriendlyErrorMessage(error);
+
+      logger.error('executeQuery() error during execution:', {
+        type: errorInfo.type,
+        message: errorInfo.message,
+        isRateLimit: errorInfo.isRateLimit,
+        retryAfter: errorInfo.retryAfter,
+        stack: (error as Error).stack,
+      });
+
+      // Build enhanced error message with additional guidance for rate limits
+      const message = errorInfo.isRateLimit
+        ? `${userMessage}\n\nTip: If you're running multiple features in auto-mode, consider reducing concurrency (maxConcurrency setting) to avoid hitting rate limits.`
+        : userMessage;
+
+      const enhancedError = new Error(message);
+      (enhancedError as any).originalError = error;
+      (enhancedError as any).type = errorInfo.type;
+
+      if (errorInfo.isRateLimit) {
+        (enhancedError as any).retryAfter = errorInfo.retryAfter;
+      }
+
+      throw enhancedError;
     }
   }
 

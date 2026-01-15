@@ -3,19 +3,29 @@ import { useState, useCallback } from 'react';
 export type SettingsViewId =
   | 'api-keys'
   | 'claude'
-  | 'ai-enhancement'
+  | 'providers'
+  | 'claude-provider'
+  | 'cursor-provider'
+  | 'codex-provider'
+  | 'opencode-provider'
+  | 'mcp-servers'
+  | 'prompts'
+  | 'model-defaults'
   | 'appearance'
   | 'terminal'
   | 'keyboard'
   | 'audio'
   | 'defaults'
+  | 'worktrees'
+  | 'account'
+  | 'security'
   | 'danger';
 
 interface UseSettingsViewOptions {
   initialView?: SettingsViewId;
 }
 
-export function useSettingsView({ initialView = 'api-keys' }: UseSettingsViewOptions = {}) {
+export function useSettingsView({ initialView = 'model-defaults' }: UseSettingsViewOptions = {}) {
   const [activeView, setActiveView] = useState<SettingsViewId>(initialView);
 
   const navigateTo = useCallback((viewId: SettingsViewId) => {

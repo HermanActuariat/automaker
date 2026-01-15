@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -6,12 +6,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { Loader2, List, FileText, GitBranch } from 'lucide-react';
+import { Loader2, List, FileText, GitBranch, ClipboardList } from 'lucide-react';
 import { getElectronAPI } from '@/lib/electron';
 import { LogViewer } from '@/components/ui/log-viewer';
 import { GitDiffPanel } from '@/components/ui/git-diff-panel';
 import { TaskProgressPanel } from '@/components/ui/task-progress-panel';
+import { Markdown } from '@/components/ui/markdown';
 import { useAppStore } from '@/store/app-store';
+import { extractSummary } from '@/lib/log-parser';
 import type { AutoModeEvent } from '@/types/electron';
 
 interface AgentOutputModalProps {
@@ -23,9 +25,11 @@ interface AgentOutputModalProps {
   featureStatus?: string;
   /** Called when a number key (0-9) is pressed while the modal is open */
   onNumberKeyPress?: (key: string) => void;
+  /** Project path - if not provided, falls back to window.__currentProject for backward compatibility */
+  projectPath?: string;
 }
 
-type ViewMode = 'parsed' | 'raw' | 'changes';
+type ViewMode = 'summary' | 'parsed' | 'raw' | 'changes';
 
 export function AgentOutputModal({
   open,
@@ -34,11 +38,18 @@ export function AgentOutputModal({
   featureId,
   featureStatus,
   onNumberKeyPress,
+  projectPath: projectPathProp,
 }: AgentOutputModalProps) {
   const [output, setOutput] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>('parsed');
+  const [viewMode, setViewMode] = useState<ViewMode | null>(null);
   const [projectPath, setProjectPath] = useState<string>('');
+
+  // Extract summary from output
+  const summary = useMemo(() => extractSummary(output), [output]);
+
+  // Determine the effective view mode - default to summary if available, otherwise parsed
+  const effectiveViewMode = viewMode ?? (summary ? 'summary' : 'parsed');
   const scrollRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
   const projectPathRef = useRef<string>('');
@@ -62,19 +73,19 @@ export function AgentOutputModal({
       setIsLoading(true);
 
       try {
-        // Get current project path from store (we'll need to pass this)
-        const currentProject = (window as any).__currentProject;
-        if (!currentProject?.path) {
+        // Use projectPath prop if provided, otherwise fall back to window.__currentProject for backward compatibility
+        const resolvedProjectPath = projectPathProp || (window as any).__currentProject?.path;
+        if (!resolvedProjectPath) {
           setIsLoading(false);
           return;
         }
 
-        projectPathRef.current = currentProject.path;
-        setProjectPath(currentProject.path);
+        projectPathRef.current = resolvedProjectPath;
+        setProjectPath(resolvedProjectPath);
 
         // Use features API to get agent output
         if (api.features) {
-          const result = await api.features.getAgentOutput(currentProject.path, featureId);
+          const result = await api.features.getAgentOutput(resolvedProjectPath, featureId);
 
           if (result.success) {
             setOutput(result.content || '');
@@ -93,7 +104,7 @@ export function AgentOutputModal({
     };
 
     loadOutput();
-  }, [open, featureId]);
+  }, [open, featureId, projectPathProp]);
 
   // Listen to auto mode events and update output
   useEffect(() => {
@@ -102,9 +113,21 @@ export function AgentOutputModal({
     const api = getElectronAPI();
     if (!api?.autoMode) return;
 
+    console.log('[AgentOutputModal] Subscribing to events for featureId:', featureId);
+
     const unsubscribe = api.autoMode.onEvent((event) => {
+      console.log(
+        '[AgentOutputModal] Received event:',
+        event.type,
+        'featureId:',
+        'featureId' in event ? event.featureId : 'none',
+        'modalFeatureId:',
+        featureId
+      );
+
       // Filter events for this specific feature only (skip events without featureId)
       if ('featureId' in event && event.featureId !== featureId) {
+        console.log('[AgentOutputModal] Skipping event - featureId mismatch');
         return;
       }
 
@@ -281,22 +304,36 @@ export function AgentOutputModal({
   return (
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent
-        className="w-[60vw] max-w-[60vw] max-h-[80vh] flex flex-col"
+        className="w-full h-full max-w-full max-h-full sm:w-[60vw] sm:max-w-[60vw] sm:max-h-[80vh] sm:h-auto sm:rounded-xl rounded-none flex flex-col"
         data-testid="agent-output-modal"
       >
-        <DialogHeader className="flex-shrink-0">
-          <div className="flex items-center justify-between">
+        <DialogHeader className="shrink-0">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pr-8">
             <DialogTitle className="flex items-center gap-2">
               {featureStatus !== 'verified' && featureStatus !== 'waiting_approval' && (
                 <Loader2 className="w-5 h-5 text-primary animate-spin" />
               )}
               Agent Output
             </DialogTitle>
-            <div className="flex items-center gap-1 bg-muted rounded-lg p-1">
+            <div className="flex items-center gap-1 bg-muted rounded-lg p-1 overflow-x-auto">
+              {summary && (
+                <button
+                  onClick={() => setViewMode('summary')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                    effectiveViewMode === 'summary'
+                      ? 'bg-primary/20 text-primary shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-accent'
+                  }`}
+                  data-testid="view-mode-summary"
+                >
+                  <ClipboardList className="w-3.5 h-3.5" />
+                  Summary
+                </button>
+              )}
               <button
                 onClick={() => setViewMode('parsed')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  viewMode === 'parsed'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                  effectiveViewMode === 'parsed'
                     ? 'bg-primary/20 text-primary shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
@@ -307,8 +344,8 @@ export function AgentOutputModal({
               </button>
               <button
                 onClick={() => setViewMode('changes')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  viewMode === 'changes'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                  effectiveViewMode === 'changes'
                     ? 'bg-primary/20 text-primary shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
@@ -319,8 +356,8 @@ export function AgentOutputModal({
               </button>
               <button
                 onClick={() => setViewMode('raw')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                  viewMode === 'raw'
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+                  effectiveViewMode === 'raw'
                     ? 'bg-primary/20 text-primary shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent'
                 }`}
@@ -343,11 +380,11 @@ export function AgentOutputModal({
         <TaskProgressPanel
           featureId={featureId}
           projectPath={projectPath}
-          className="flex-shrink-0 mx-1"
+          className="flex-shrink-0 mx-3 my-2"
         />
 
-        {viewMode === 'changes' ? (
-          <div className="flex-1 min-h-[400px] max-h-[60vh] overflow-y-auto scrollbar-visible">
+        {effectiveViewMode === 'changes' ? (
+          <div className="flex-1 min-h-0 sm:min-h-[200px] sm:max-h-[60vh] overflow-y-auto scrollbar-visible">
             {projectPath ? (
               <GitDiffPanel
                 projectPath={projectPath}
@@ -363,12 +400,16 @@ export function AgentOutputModal({
               </div>
             )}
           </div>
+        ) : effectiveViewMode === 'summary' && summary ? (
+          <div className="flex-1 min-h-0 sm:min-h-[200px] sm:max-h-[60vh] overflow-y-auto bg-card border border-border/50 rounded-lg p-4 scrollbar-visible">
+            <Markdown>{summary}</Markdown>
+          </div>
         ) : (
           <>
             <div
               ref={scrollRef}
               onScroll={handleScroll}
-              className="flex-1 overflow-y-auto bg-zinc-950 rounded-lg p-4 font-mono text-xs min-h-[400px] max-h-[60vh] scrollbar-visible"
+              className="flex-1 min-h-0 sm:min-h-[200px] sm:max-h-[60vh] overflow-y-auto bg-zinc-950 rounded-lg p-4 font-mono text-xs scrollbar-visible"
             >
               {isLoading && !output ? (
                 <div className="flex items-center justify-center h-full text-muted-foreground">
@@ -379,7 +420,7 @@ export function AgentOutputModal({
                 <div className="flex items-center justify-center h-full text-muted-foreground">
                   No output yet. The agent will stream output here as it works.
                 </div>
-              ) : viewMode === 'parsed' ? (
+              ) : effectiveViewMode === 'parsed' ? (
                 <LogViewer output={output} />
               ) : (
                 <div className="whitespace-pre-wrap break-words text-zinc-300">{output}</div>

@@ -1,15 +1,26 @@
 import { Page } from '@playwright/test';
 import { clickElement } from '../core/interactions';
-import { waitForElement } from '../core/waiting';
+import { handleLoginScreenIfPresent } from '../core/interactions';
+import { waitForElement, waitForSplashScreenToDisappear } from '../core/waiting';
+import { authenticateForTests } from '../api/client';
 
 /**
  * Navigate to the board/kanban view
  * Note: Navigates directly to /board since index route shows WelcomeView
  */
 export async function navigateToBoard(page: Page): Promise<void> {
+  // Authenticate before navigating
+  await authenticateForTests(page);
+
   // Navigate directly to /board route
   await page.goto('/board');
   await page.waitForLoadState('load');
+
+  // Wait for splash screen to disappear (safety net)
+  await waitForSplashScreenToDisappear(page, 3000);
+
+  // Handle login redirect if needed
+  await handleLoginScreenIfPresent(page);
 
   // Wait for the board view to be visible
   await waitForElement(page, 'board-view', { timeout: 10000 });
@@ -20,9 +31,18 @@ export async function navigateToBoard(page: Page): Promise<void> {
  * Note: Navigates directly to /context since index route shows WelcomeView
  */
 export async function navigateToContext(page: Page): Promise<void> {
+  // Authenticate before navigating
+  await authenticateForTests(page);
+
   // Navigate directly to /context route
   await page.goto('/context');
   await page.waitForLoadState('load');
+
+  // Wait for splash screen to disappear (safety net)
+  await waitForSplashScreenToDisappear(page, 3000);
+
+  // Handle login redirect if needed
+  await handleLoginScreenIfPresent(page);
 
   // Wait for loading to complete (if present)
   const loadingElement = page.locator('[data-testid="context-view-loading"]');
@@ -37,7 +57,8 @@ export async function navigateToContext(page: Page): Promise<void> {
   }
 
   // Wait for the context view to be visible
-  await waitForElement(page, 'context-view', { timeout: 10000 });
+  // Increase timeout to handle slower server startup
+  await waitForElement(page, 'context-view', { timeout: 15000 });
 }
 
 /**
@@ -45,9 +66,15 @@ export async function navigateToContext(page: Page): Promise<void> {
  * Note: Navigates directly to /spec since index route shows WelcomeView
  */
 export async function navigateToSpec(page: Page): Promise<void> {
+  // Authenticate before navigating
+  await authenticateForTests(page);
+
   // Navigate directly to /spec route
   await page.goto('/spec');
   await page.waitForLoadState('load');
+
+  // Wait for splash screen to disappear (safety net)
+  await waitForSplashScreenToDisappear(page, 3000);
 
   // Wait for loading state to complete first (if present)
   const loadingElement = page.locator('[data-testid="spec-view-loading"]');
@@ -75,9 +102,18 @@ export async function navigateToSpec(page: Page): Promise<void> {
  * Note: Navigates directly to /agent since index route shows WelcomeView
  */
 export async function navigateToAgent(page: Page): Promise<void> {
+  // Authenticate before navigating
+  await authenticateForTests(page);
+
   // Navigate directly to /agent route
   await page.goto('/agent');
   await page.waitForLoadState('load');
+
+  // Wait for splash screen to disappear (safety net)
+  await waitForSplashScreenToDisappear(page, 3000);
+
+  // Handle login redirect if needed
+  await handleLoginScreenIfPresent(page);
 
   // Wait for the agent view to be visible
   await waitForElement(page, 'agent-view', { timeout: 10000 });
@@ -88,9 +124,15 @@ export async function navigateToAgent(page: Page): Promise<void> {
  * Note: Navigates directly to /settings since index route shows WelcomeView
  */
 export async function navigateToSettings(page: Page): Promise<void> {
+  // Authenticate before navigating
+  await authenticateForTests(page);
+
   // Navigate directly to /settings route
   await page.goto('/settings');
   await page.waitForLoadState('load');
+
+  // Wait for splash screen to disappear (safety net)
+  await waitForSplashScreenToDisappear(page, 3000);
 
   // Wait for the settings view to be visible
   await waitForElement(page, 'settings-view', { timeout: 10000 });
@@ -110,12 +152,27 @@ export async function navigateToSetup(page: Page): Promise<void> {
 }
 
 /**
- * Navigate to the welcome view (clear project selection)
+ * Navigate to the welcome/dashboard view (clear project selection)
+ * Note: The app redirects from / to /dashboard when no project is selected
  */
 export async function navigateToWelcome(page: Page): Promise<void> {
+  // Authenticate before navigating
+  await authenticateForTests(page);
+
   await page.goto('/');
   await page.waitForLoadState('load');
-  await waitForElement(page, 'welcome-view', { timeout: 10000 });
+
+  // Wait for splash screen to disappear (safety net)
+  await waitForSplashScreenToDisappear(page, 3000);
+
+  // Handle login redirect if needed
+  await handleLoginScreenIfPresent(page);
+
+  // Wait for either welcome-view or dashboard-view (app redirects to /dashboard when no project)
+  await page
+    .locator('[data-testid="welcome-view"], [data-testid="dashboard-view"]')
+    .first()
+    .waitFor({ state: 'visible', timeout: 10000 });
 }
 
 /**

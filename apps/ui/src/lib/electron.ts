@@ -1,6 +1,6 @@
 // Type definitions for Electron IPC API
 import type { SessionListItem, Message } from '@/types/electron';
-import type { ClaudeUsageResponse } from '@/store/app-store';
+import type { ClaudeUsageResponse, CodexUsageResponse } from '@/store/app-store';
 import type {
   IssueValidationVerdict,
   IssueValidationConfidence,
@@ -10,7 +10,23 @@ import type {
   IssueValidationResponse,
   IssueValidationEvent,
   StoredValidation,
-  AgentModel,
+  ModelId,
+  ThinkingLevel,
+  ReasoningEffort,
+  GitHubComment,
+  IssueCommentsResult,
+  Idea,
+  IdeaCategory,
+  IdeationSession,
+  IdeationMessage,
+  IdeationPrompt,
+  PromptCategory,
+  ProjectAnalysisResult,
+  AnalysisSuggestion,
+  StartSessionOptions,
+  CreateIdeaInput,
+  UpdateIdeaInput,
+  ConvertToFeatureOptions,
 } from '@automaker/types';
 import { getJSON, setJSON, removeItem } from './storage';
 
@@ -24,7 +40,107 @@ export type {
   IssueValidationResponse,
   IssueValidationEvent,
   StoredValidation,
+  GitHubComment,
+  IssueCommentsResult,
 };
+
+// Re-export ideation types
+export type {
+  Idea,
+  IdeaCategory,
+  IdeationSession,
+  IdeationMessage,
+  IdeationPrompt,
+  PromptCategory,
+  ProjectAnalysisResult,
+  AnalysisSuggestion,
+  StartSessionOptions,
+  CreateIdeaInput,
+  UpdateIdeaInput,
+  ConvertToFeatureOptions,
+};
+
+// Ideation API interface
+export interface IdeationAPI {
+  // Session management
+  startSession: (
+    projectPath: string,
+    options?: StartSessionOptions
+  ) => Promise<{ success: boolean; session?: IdeationSession; error?: string }>;
+  getSession: (
+    projectPath: string,
+    sessionId: string
+  ) => Promise<{
+    success: boolean;
+    session?: IdeationSession;
+    messages?: IdeationMessage[];
+    error?: string;
+  }>;
+  sendMessage: (
+    sessionId: string,
+    message: string,
+    options?: { imagePaths?: string[]; model?: string }
+  ) => Promise<{ success: boolean; error?: string }>;
+  stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Ideas CRUD
+  listIdeas: (projectPath: string) => Promise<{ success: boolean; ideas?: Idea[]; error?: string }>;
+  createIdea: (
+    projectPath: string,
+    idea: CreateIdeaInput
+  ) => Promise<{ success: boolean; idea?: Idea; error?: string }>;
+  getIdea: (
+    projectPath: string,
+    ideaId: string
+  ) => Promise<{ success: boolean; idea?: Idea; error?: string }>;
+  updateIdea: (
+    projectPath: string,
+    ideaId: string,
+    updates: UpdateIdeaInput
+  ) => Promise<{ success: boolean; idea?: Idea; error?: string }>;
+  deleteIdea: (
+    projectPath: string,
+    ideaId: string
+  ) => Promise<{ success: boolean; error?: string }>;
+
+  // Project analysis
+  analyzeProject: (
+    projectPath: string
+  ) => Promise<{ success: boolean; analysis?: ProjectAnalysisResult; error?: string }>;
+
+  // Generate suggestions from a prompt
+  generateSuggestions: (
+    projectPath: string,
+    promptId: string,
+    category: IdeaCategory,
+    count?: number
+  ) => Promise<{ success: boolean; suggestions?: AnalysisSuggestion[]; error?: string }>;
+
+  // Convert to feature
+  convertToFeature: (
+    projectPath: string,
+    ideaId: string,
+    options?: ConvertToFeatureOptions
+  ) => Promise<{ success: boolean; feature?: any; featureId?: string; error?: string }>;
+
+  // Add suggestion directly to board as feature
+  addSuggestionToBoard: (
+    projectPath: string,
+    suggestion: AnalysisSuggestion
+  ) => Promise<{ success: boolean; featureId?: string; error?: string }>;
+
+  // Get guided prompts (single source of truth from backend)
+  getPrompts: () => Promise<{
+    success: boolean;
+    prompts?: IdeationPrompt[];
+    categories?: PromptCategory[];
+    error?: string;
+  }>;
+
+  // Event subscriptions
+  onStream: (callback: (event: any) => void) => () => void;
+  onAnalysisEvent: (callback: (event: any) => void) => () => void;
+}
 
 export interface FileEntry {
   name: string;
@@ -91,7 +207,7 @@ import type {
 } from '@/types/electron';
 
 // Import HTTP API client (ES module)
-import { getHttpApiClient } from './http-api-client';
+import { getHttpApiClient, getServerUrlSync } from './http-api-client';
 
 // Feature type - Import from app-store
 import type { Feature } from '@/store/app-store';
@@ -102,6 +218,8 @@ export interface RunningAgent {
   projectPath: string;
   projectName: string;
   isAutoMode: boolean;
+  title?: string;
+  description?: string;
 }
 
 export interface RunningAgentsResult {
@@ -198,7 +316,9 @@ export interface GitHubAPI {
   validateIssue: (
     projectPath: string,
     issue: IssueValidationInput,
-    model?: AgentModel
+    model?: ModelId,
+    thinkingLevel?: ThinkingLevel,
+    reasoningEffort?: ReasoningEffort
   ) => Promise<{ success: boolean; message?: string; issueNumber?: number; error?: string }>;
   /** Check validation status for an issue or all issues */
   getValidationStatus: (
@@ -234,6 +354,19 @@ export interface GitHubAPI {
   ) => Promise<{ success: boolean; error?: string }>;
   /** Subscribe to validation events */
   onValidationEvent: (callback: (event: IssueValidationEvent) => void) => () => void;
+  /** Fetch comments for a specific issue */
+  getIssueComments: (
+    projectPath: string,
+    issueNumber: number,
+    cursor?: string
+  ) => Promise<{
+    success: boolean;
+    comments?: GitHubComment[];
+    totalCount?: number;
+    hasNextPage?: boolean;
+    endCursor?: string;
+    error?: string;
+  }>;
 }
 
 // Feature Suggestions types
@@ -304,11 +437,12 @@ export interface SpecRegenerationAPI {
     success: boolean;
     error?: string;
   }>;
-  stop: () => Promise<{ success: boolean; error?: string }>;
-  status: () => Promise<{
+  stop: (projectPath?: string) => Promise<{ success: boolean; error?: string }>;
+  status: (projectPath?: string) => Promise<{
     success: boolean;
     isRunning?: boolean;
     currentPhase?: string;
+    projectPath?: string;
     error?: string;
   }>;
   onEvent: (callback: (event: SpecRegenerationEvent) => void) => () => void;
@@ -330,7 +464,10 @@ export interface FeaturesAPI {
   update: (
     projectPath: string,
     featureId: string,
-    updates: Partial<Feature>
+    updates: Partial<Feature>,
+    descriptionHistorySource?: 'enhance' | 'edit',
+    enhancementMode?: 'improve' | 'technical' | 'simplify' | 'acceptance' | 'ux-reviewer',
+    preEnhancementDescription?: string
   ) => Promise<{ success: boolean; feature?: Feature; error?: string }>;
   delete: (projectPath: string, featureId: string) => Promise<{ success: boolean; error?: string }>;
   getAgentOutput: (
@@ -387,7 +524,7 @@ export interface AutoModeAPI {
     featureId: string,
     prompt: string,
     imagePaths?: string[],
-    worktreePath?: string
+    useWorktrees?: boolean
   ) => Promise<{ success: boolean; passes?: boolean; error?: string }>;
   commitFeature: (
     projectPath: string,
@@ -401,6 +538,9 @@ export interface AutoModeAPI {
     editedPlan?: string,
     feedback?: string
   ) => Promise<{ success: boolean; error?: string }>;
+  resumeInterrupted: (
+    projectPath: string
+  ) => Promise<{ success: boolean; message?: string; error?: string }>;
   onEvent: (callback: (event: AutoModeEvent) => void) => () => void;
 }
 
@@ -412,6 +552,8 @@ export interface SaveImageResult {
 
 export interface ElectronAPI {
   ping: () => Promise<string>;
+  getApiKey?: () => Promise<string | null>;
+  quit?: () => Promise<void>;
   openExternalLink: (url: string) => Promise<{ success: boolean; error?: string }>;
   openDirectory: () => Promise<DialogResult>;
   openFile: (options?: object) => Promise<DialogResult>;
@@ -435,6 +577,7 @@ export interface ElectronAPI {
     mimeType: string,
     projectPath?: string
   ) => Promise<SaveImageResult>;
+  isElectron?: boolean;
   checkClaudeCli?: () => Promise<{
     success: boolean;
     status?: string;
@@ -474,86 +617,52 @@ export interface ElectronAPI {
     enhance: (
       originalText: string,
       enhancementMode: string,
-      model?: string
+      model?: string,
+      thinkingLevel?: string
     ) => Promise<{
       success: boolean;
       enhancedText?: string;
       error?: string;
     }>;
   };
-  setup?: {
-    getClaudeStatus: () => Promise<{
-      success: boolean;
-      status?: string;
-      installed?: boolean;
-      method?: string;
-      version?: string;
-      path?: string;
-      auth?: {
-        authenticated: boolean;
-        method: string;
-        hasCredentialsFile?: boolean;
-        hasToken?: boolean;
-        hasStoredOAuthToken?: boolean;
-        hasStoredApiKey?: boolean;
-        hasEnvApiKey?: boolean;
-        hasEnvOAuthToken?: boolean;
-      };
-      error?: string;
-    }>;
-    installClaude: () => Promise<{
-      success: boolean;
-      message?: string;
-      error?: string;
-    }>;
-    authClaude: () => Promise<{
-      success: boolean;
-      token?: string;
-      requiresManualAuth?: boolean;
-      terminalOpened?: boolean;
-      command?: string;
-      error?: string;
-      message?: string;
-      output?: string;
-    }>;
-    storeApiKey: (
-      provider: string,
-      apiKey: string
-    ) => Promise<{ success: boolean; error?: string }>;
-    deleteApiKey: (
-      provider: string
-    ) => Promise<{ success: boolean; error?: string; message?: string }>;
-    getApiKeys: () => Promise<{
-      success: boolean;
-      hasAnthropicKey: boolean;
-      hasGoogleKey: boolean;
-    }>;
-    getPlatform: () => Promise<{
-      success: boolean;
-      platform: string;
-      arch: string;
-      homeDir: string;
-      isWindows: boolean;
-      isMac: boolean;
-      isLinux: boolean;
-    }>;
-    verifyClaudeAuth: (authMethod?: 'cli' | 'api_key') => Promise<{
-      success: boolean;
-      authenticated: boolean;
-      error?: string;
-    }>;
-    getGhStatus?: () => Promise<{
-      success: boolean;
-      installed: boolean;
-      authenticated: boolean;
-      version: string | null;
-      path: string | null;
-      user: string | null;
-      error?: string;
-    }>;
-    onInstallProgress?: (callback: (progress: any) => void) => () => void;
-    onAuthProgress?: (callback: (progress: any) => void) => () => void;
+  templates?: {
+    clone: (
+      repoUrl: string,
+      projectName: string,
+      parentDir: string
+    ) => Promise<{ success: boolean; projectPath?: string; error?: string }>;
   };
+  backlogPlan?: {
+    generate: (
+      projectPath: string,
+      prompt: string,
+      model?: string
+    ) => Promise<{ success: boolean; error?: string }>;
+    stop: () => Promise<{ success: boolean; error?: string }>;
+    status: () => Promise<{ success: boolean; isRunning?: boolean; error?: string }>;
+    apply: (
+      projectPath: string,
+      plan: {
+        changes: Array<{
+          type: 'add' | 'update' | 'delete';
+          featureId?: string;
+          feature?: Record<string, unknown>;
+          reason: string;
+        }>;
+        summary: string;
+        dependencyUpdates: Array<{
+          featureId: string;
+          removedDependencies: string[];
+          addedDependencies: string[];
+        }>;
+      },
+      branchName?: string
+    ) => Promise<{ success: boolean; appliedChanges?: string[]; error?: string }>;
+    onEvent: (callback: (data: unknown) => void) => () => void;
+  };
+  // Setup API surface is implemented by the main process and mirrored by HttpApiClient.
+  // Keep this intentionally loose to avoid tight coupling between front-end and server types.
+  setup?: any;
   agent?: {
     start: (
       sessionId: string,
@@ -626,6 +735,101 @@ export interface ElectronAPI {
       error?: string;
     }>;
   };
+  ideation?: IdeationAPI;
+  codex?: {
+    getUsage: () => Promise<CodexUsageResponse>;
+    getModels: (refresh?: boolean) => Promise<{
+      success: boolean;
+      models?: Array<{
+        id: string;
+        label: string;
+        description: string;
+        hasThinking: boolean;
+        supportsVision: boolean;
+        tier: 'premium' | 'standard' | 'basic';
+        isDefault: boolean;
+      }>;
+      cachedAt?: number;
+      error?: string;
+    }>;
+  };
+  settings?: {
+    getStatus: () => Promise<{
+      success: boolean;
+      hasGlobalSettings: boolean;
+      hasCredentials: boolean;
+      dataDir: string;
+      needsMigration: boolean;
+    }>;
+    getGlobal: () => Promise<{
+      success: boolean;
+      settings?: Record<string, unknown>;
+      error?: string;
+    }>;
+    updateGlobal: (updates: Record<string, unknown>) => Promise<{
+      success: boolean;
+      settings?: Record<string, unknown>;
+      error?: string;
+    }>;
+    getCredentials: () => Promise<{
+      success: boolean;
+      credentials?: {
+        anthropic: { configured: boolean; masked: string };
+        google: { configured: boolean; masked: string };
+        openai: { configured: boolean; masked: string };
+      };
+      error?: string;
+    }>;
+    updateCredentials: (updates: {
+      apiKeys?: { anthropic?: string; google?: string; openai?: string };
+    }) => Promise<{
+      success: boolean;
+      credentials?: {
+        anthropic: { configured: boolean; masked: string };
+        google: { configured: boolean; masked: string };
+        openai: { configured: boolean; masked: string };
+      };
+      error?: string;
+    }>;
+    getProject: (projectPath: string) => Promise<{
+      success: boolean;
+      settings?: Record<string, unknown>;
+      error?: string;
+    }>;
+    updateProject: (
+      projectPath: string,
+      updates: Record<string, unknown>
+    ) => Promise<{
+      success: boolean;
+      settings?: Record<string, unknown>;
+      error?: string;
+    }>;
+    migrate: (data: Record<string, string>) => Promise<{
+      success: boolean;
+      migratedGlobalSettings: boolean;
+      migratedCredentials: boolean;
+      migratedProjectCount: number;
+      errors: string[];
+    }>;
+    discoverAgents: (
+      projectPath?: string,
+      sources?: Array<'user' | 'project'>
+    ) => Promise<{
+      success: boolean;
+      agents?: Array<{
+        name: string;
+        definition: {
+          description: string;
+          prompt: string;
+          tools?: string[];
+          model?: 'sonnet' | 'opus' | 'haiku' | 'inherit';
+        };
+        source: 'user' | 'project';
+        filePath: string;
+      }>;
+      error?: string;
+    }>;
+  };
 }
 
 // Note: Window interface is declared in @/types/electron.d.ts
@@ -657,11 +861,13 @@ export const isElectron = (): boolean => {
     return false;
   }
 
-  if ((window as any).isElectron === true) {
+  const w = window as any;
+
+  if (w.isElectron === true) {
     return true;
   }
 
-  return window.electronAPI?.isElectron === true;
+  return !!w.electronAPI?.isElectron;
 };
 
 // Check if backend server is available
@@ -674,7 +880,7 @@ export const checkServerAvailable = async (): Promise<boolean> => {
 
   serverCheckPromise = (async () => {
     try {
-      const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:3008';
+      const serverUrl = import.meta.env.VITE_SERVER_URL || getServerUrlSync();
       const response = await fetch(`${serverUrl}/api/health`, {
         method: 'GET',
         signal: AbortSignal.timeout(2000),
@@ -1092,6 +1298,7 @@ interface SetupAPI {
     success: boolean;
     hasAnthropicKey: boolean;
     hasGoogleKey: boolean;
+    hasOpenaiKey: boolean;
   }>;
   deleteApiKey: (
     provider: string
@@ -1175,6 +1382,7 @@ function createMockSetupAPI(): SetupAPI {
         success: true,
         hasAnthropicKey: false,
         hasGoogleKey: false,
+        hasOpenaiKey: false,
       };
     },
 
@@ -1232,13 +1440,19 @@ function createMockSetupAPI(): SetupAPI {
 // Mock Worktree API implementation
 function createMockWorktreeAPI(): WorktreeAPI {
   return {
-    mergeFeature: async (projectPath: string, featureId: string, options?: object) => {
+    mergeFeature: async (
+      projectPath: string,
+      branchName: string,
+      worktreePath: string,
+      options?: object
+    ) => {
       console.log('[Mock] Merging feature:', {
         projectPath,
-        featureId,
+        branchName,
+        worktreePath,
         options,
       });
-      return { success: true, mergedBranch: `feature/${featureId}` };
+      return { success: true, mergedBranch: branchName };
     },
 
     getInfo: async (projectPath: string, featureId: string) => {
@@ -1332,6 +1546,14 @@ function createMockWorktreeAPI(): WorktreeAPI {
           branch: 'feature-branch',
           message,
         },
+      };
+    },
+
+    generateCommitMessage: async (worktreePath: string) => {
+      console.log('[Mock] Generating commit message for:', worktreePath);
+      return {
+        success: true,
+        message: 'feat: Add mock commit message generation',
       };
     },
 
@@ -1444,13 +1666,34 @@ function createMockWorktreeAPI(): WorktreeAPI {
       };
     },
 
-    openInEditor: async (worktreePath: string) => {
-      console.log('[Mock] Opening in editor:', worktreePath);
+    openInEditor: async (worktreePath: string, editorCommand?: string) => {
+      const ANTIGRAVITY_EDITOR_COMMAND = 'antigravity';
+      const ANTIGRAVITY_LEGACY_COMMAND = 'agy';
+      // Map editor commands to display names
+      const editorNameMap: Record<string, string> = {
+        cursor: 'Cursor',
+        code: 'VS Code',
+        zed: 'Zed',
+        subl: 'Sublime Text',
+        windsurf: 'Windsurf',
+        trae: 'Trae',
+        rider: 'Rider',
+        webstorm: 'WebStorm',
+        xed: 'Xcode',
+        studio: 'Android Studio',
+        [ANTIGRAVITY_EDITOR_COMMAND]: 'Antigravity',
+        [ANTIGRAVITY_LEGACY_COMMAND]: 'Antigravity',
+        open: 'Finder',
+        explorer: 'Explorer',
+        'xdg-open': 'File Manager',
+      };
+      const editorName = editorCommand ? (editorNameMap[editorCommand] ?? 'Editor') : 'VS Code';
+      console.log('[Mock] Opening in editor:', worktreePath, 'using:', editorName);
       return {
         success: true,
         result: {
-          message: `Opened ${worktreePath} in VS Code`,
-          editorName: 'VS Code',
+          message: `Opened ${worktreePath} in ${editorName}`,
+          editorName,
         },
       };
     },
@@ -1462,6 +1705,32 @@ function createMockWorktreeAPI(): WorktreeAPI {
         result: {
           editorName: 'VS Code',
           editorCommand: 'code',
+        },
+      };
+    },
+
+    getAvailableEditors: async () => {
+      console.log('[Mock] Getting available editors');
+      return {
+        success: true,
+        result: {
+          editors: [
+            { name: 'VS Code', command: 'code' },
+            { name: 'Finder', command: 'open' },
+          ],
+        },
+      };
+    },
+    refreshEditors: async () => {
+      console.log('[Mock] Refreshing available editors');
+      return {
+        success: true,
+        result: {
+          editors: [
+            { name: 'VS Code', command: 'code' },
+            { name: 'Finder', command: 'open' },
+          ],
+          message: 'Found 2 available editors',
         },
       };
     },
@@ -1511,6 +1780,22 @@ function createMockWorktreeAPI(): WorktreeAPI {
       };
     },
 
+    getDevServerLogs: async (worktreePath: string) => {
+      console.log('[Mock] Getting dev server logs:', { worktreePath });
+      return {
+        success: false,
+        error: 'No dev server running for this worktree',
+      };
+    },
+
+    onDevServerLogEvent: (callback) => {
+      console.log('[Mock] Subscribing to dev server log events');
+      // Return unsubscribe function
+      return () => {
+        console.log('[Mock] Unsubscribing from dev server log events');
+      };
+    },
+
     getPRInfo: async (worktreePath: string, branchName: string) => {
       console.log('[Mock] Getting PR info:', { worktreePath, branchName });
       return {
@@ -1519,6 +1804,47 @@ function createMockWorktreeAPI(): WorktreeAPI {
           hasPR: false,
           ghCliAvailable: false,
         },
+      };
+    },
+
+    getInitScript: async (projectPath: string) => {
+      console.log('[Mock] Getting init script:', { projectPath });
+      return {
+        success: true,
+        exists: false,
+        content: '',
+        path: `${projectPath}/.automaker/worktree-init.sh`,
+      };
+    },
+
+    setInitScript: async (projectPath: string, content: string) => {
+      console.log('[Mock] Setting init script:', { projectPath, content });
+      return {
+        success: true,
+        path: `${projectPath}/.automaker/worktree-init.sh`,
+      };
+    },
+
+    deleteInitScript: async (projectPath: string) => {
+      console.log('[Mock] Deleting init script:', { projectPath });
+      return {
+        success: true,
+      };
+    },
+
+    runInitScript: async (projectPath: string, worktreePath: string, branch: string) => {
+      console.log('[Mock] Running init script:', { projectPath, worktreePath, branch });
+      return {
+        success: true,
+        message: 'Init script started (mock)',
+      };
+    },
+
+    onInitScriptEvent: (callback) => {
+      console.log('[Mock] Subscribing to init script events');
+      // Return unsubscribe function
+      return () => {
+        console.log('[Mock] Unsubscribing from init script events');
       };
     },
   };
@@ -1793,7 +2119,7 @@ function createMockAutoModeAPI(): AutoModeAPI {
       featureId: string,
       prompt: string,
       imagePaths?: string[],
-      worktreePath?: string
+      useWorktrees?: boolean
     ) => {
       if (mockRunningFeatures.has(featureId)) {
         return {
@@ -1872,6 +2198,11 @@ function createMockAutoModeAPI(): AutoModeAPI {
         feedback,
       });
       return { success: true };
+    },
+
+    resumeInterrupted: async (projectPath: string) => {
+      console.log('[Mock] Resume interrupted features for:', projectPath);
+      return { success: true, message: 'Mock: no interrupted features' };
     },
 
     onEvent: (callback: (event: AutoModeEvent) => void) => {
@@ -2303,7 +2634,7 @@ function createMockSpecRegenerationAPI(): SpecRegenerationAPI {
       return { success: true };
     },
 
-    stop: async () => {
+    stop: async (_projectPath?: string) => {
       mockSpecRegenerationRunning = false;
       mockSpecRegenerationPhase = '';
       if (mockSpecRegenerationTimeout) {
@@ -2313,7 +2644,7 @@ function createMockSpecRegenerationAPI(): SpecRegenerationAPI {
       return { success: true };
     },
 
-    status: async () => {
+    status: async (_projectPath?: string) => {
       return {
         success: true,
         isRunning: mockSpecRegenerationRunning,
@@ -2670,6 +3001,8 @@ function createMockRunningAgentsAPI(): RunningAgentsAPI {
         projectPath: '/mock/project',
         projectName: 'Mock Project',
         isAutoMode: mockAutoModeRunning,
+        title: `Mock Feature Title for ${featureId}`,
+        description: 'This is a mock feature description for testing purposes.',
       }));
       return {
         success: true,
@@ -2711,8 +3044,20 @@ function createMockGitHubAPI(): GitHubAPI {
         mergedPRs: [],
       };
     },
-    validateIssue: async (projectPath: string, issue: IssueValidationInput, model?: AgentModel) => {
-      console.log('[Mock] Starting async validation:', { projectPath, issue, model });
+    validateIssue: async (
+      projectPath: string,
+      issue: IssueValidationInput,
+      model?: ModelId,
+      thinkingLevel?: ThinkingLevel,
+      reasoningEffort?: ReasoningEffort
+    ) => {
+      console.log('[Mock] Starting async validation:', {
+        projectPath,
+        issue,
+        model,
+        thinkingLevel,
+        reasoningEffort,
+      });
 
       // Simulate async validation in background
       setTimeout(() => {
@@ -2786,6 +3131,15 @@ function createMockGitHubAPI(): GitHubAPI {
         mockValidationCallbacks = mockValidationCallbacks.filter((cb) => cb !== callback);
       };
     },
+    getIssueComments: async (projectPath: string, issueNumber: number, cursor?: string) => {
+      console.log('[Mock] Getting issue comments:', { projectPath, issueNumber, cursor });
+      return {
+        success: true,
+        comments: [],
+        totalCount: 0,
+        hasNextPage: false,
+      };
+    },
   };
 }
 
@@ -2797,6 +3151,9 @@ export interface Project {
   path: string;
   lastOpened?: string;
   theme?: string; // Per-project theme override (uses ThemeMode from app-store)
+  isFavorite?: boolean; // Pin project to top of dashboard
+  icon?: string; // Lucide icon name for project identification
+  customIconPath?: string; // Path to custom uploaded icon image in .automaker/images/
 }
 
 export interface TrashedProject extends Project {

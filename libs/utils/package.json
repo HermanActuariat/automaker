@@ -5,6 +5,16 @@
   "description": "Shared utility functions for AutoMaker",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./logger": {
+      "types": "./dist/logger.d.ts",
+      "default": "./dist/logger.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
@@ -17,13 +27,16 @@
   ],
   "author": "AutoMaker Team",
   "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=22.0.0 <23.0.0"
+  },
   "dependencies": {
-    "@automaker/platform": "^1.0.0",
-    "@automaker/types": "^1.0.0"
+    "@automaker/platform": "1.0.0",
+    "@automaker/types": "1.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.5",
-    "typescript": "^5.7.3",
-    "vitest": "^4.0.16"
+    "@types/node": "22.19.3",
+    "typescript": "5.9.3",
+    "vitest": "4.0.16"
   }
 }

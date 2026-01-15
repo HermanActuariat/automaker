@@ -5,27 +5,14 @@
 import type { Request, Response } from 'express';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import os from 'os';
-import path from 'path';
-import fs from 'fs/promises';
+import { getGitHubCliPaths, getExtendedPath, systemPathAccess } from '@automaker/platform';
 import { getErrorMessage, logError } from '../common.js';
 
 const execAsync = promisify(exec);
 
-// Extended PATH to include common tool installation locations
-const extendedPath = [
-  process.env.PATH,
-  '/opt/homebrew/bin',
-  '/usr/local/bin',
-  '/home/linuxbrew/.linuxbrew/bin',
-  `${process.env.HOME}/.local/bin`,
-]
-  .filter(Boolean)
-  .join(':');
-
 const execEnv = {
   ...process.env,
-  PATH: extendedPath,
+  PATH: getExtendedPath(),
 };
 
 export interface GhStatus {
@@ -55,25 +42,16 @@ async function getGhStatus(): Promise<GhStatus> {
     status.path = stdout.trim().split(/\r?\n/)[0];
     status.installed = true;
   } catch {
-    // gh not in PATH, try common locations
-    const commonPaths = isWindows
-      ? [
-          path.join(process.env.LOCALAPPDATA || '', 'Programs', 'gh', 'bin', 'gh.exe'),
-          path.join(process.env.ProgramFiles || '', 'GitHub CLI', 'gh.exe'),
-        ]
-      : [
-          '/opt/homebrew/bin/gh',
-          '/usr/local/bin/gh',
-          path.join(os.homedir(), '.local', 'bin', 'gh'),
-          '/home/linuxbrew/.linuxbrew/bin/gh',
-        ];
+    // gh not in PATH, try common locations from centralized system paths
+    const commonPaths = getGitHubCliPaths();
 
     for (const p of commonPaths) {
       try {
-        await fs.access(p);
-        status.path = p;
-        status.installed = true;
-        break;
+        if (await systemPathAccess(p)) {
+          status.path = p;
+          status.installed = true;
+          break;
+        }
       } catch {
         // Not found at this path
       }
@@ -94,23 +72,37 @@ async function getGhStatus(): Promise<GhStatus> {
     // Version command failed
   }
 
-  // Check authentication status
+  // Check authentication status by actually making an API call
+  // gh auth status can return non-zero even when GH_TOKEN is valid
+  let apiCallSucceeded = false;
   try {
-    const { stdout } = await execAsync('gh auth status', { env: execEnv });
-    // If this succeeds without error, we're authenticated
-    status.authenticated = true;
-
-    // Try to extract username from output
-    const userMatch =
-      stdout.match(/Logged in to [^\s]+ account ([^\s]+)/i) ||
-      stdout.match(/Logged in to [^\s]+ as ([^\s]+)/i);
-    if (userMatch) {
-      status.user = userMatch[1];
+    const { stdout } = await execAsync('gh api user --jq ".login"', { env: execEnv });
+    const user = stdout.trim();
+    if (user) {
+      status.authenticated = true;
+      status.user = user;
+      apiCallSucceeded = true;
     }
-  } catch (error: unknown) {
-    // Auth status returns non-zero if not authenticated
-    const err = error as { stderr?: string };
-    if (err.stderr?.includes('not logged in')) {
+    // If stdout is empty, fall through to gh auth status fallback
+  } catch {
+    // API call failed - fall through to gh auth status fallback
+  }
+
+  // Fallback: try gh auth status if API call didn't succeed
+  if (!apiCallSucceeded) {
+    try {
+      const { stdout } = await execAsync('gh auth status', { env: execEnv });
+      status.authenticated = true;
+
+      // Try to extract username from output
+      const userMatch =
+        stdout.match(/Logged in to [^\s]+ account ([^\s]+)/i) ||
+        stdout.match(/Logged in to [^\s]+ as ([^\s]+)/i);
+      if (userMatch) {
+        status.user = userMatch[1];
+      }
+    } catch {
+      // Auth status returns non-zero if not authenticated
       status.authenticated = false;
     }
   }

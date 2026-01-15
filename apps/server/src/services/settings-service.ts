@@ -22,16 +22,18 @@ import type {
   Credentials,
   ProjectSettings,
   KeyboardShortcuts,
-  AIProfile,
   ProjectRef,
   TrashedProjectRef,
   BoardBackgroundSettings,
   WorktreeInfo,
+  PhaseModelConfig,
+  PhaseModelEntry,
 } from '../types/settings.js';
 import {
   DEFAULT_GLOBAL_SETTINGS,
   DEFAULT_CREDENTIALS,
   DEFAULT_PROJECT_SETTINGS,
+  DEFAULT_PHASE_MODELS,
   SETTINGS_VERSION,
   CREDENTIALS_VERSION,
   PROJECT_SETTINGS_VERSION,
@@ -124,21 +126,129 @@ export class SettingsService {
    * Missing fields are filled in from DEFAULT_GLOBAL_SETTINGS for forward/backward
    * compatibility during schema migrations.
    *
+   * Also applies version-based migrations for breaking changes.
+   *
    * @returns Promise resolving to complete GlobalSettings object
    */
   async getGlobalSettings(): Promise<GlobalSettings> {
     const settingsPath = getGlobalSettingsPath(this.dataDir);
     const settings = await readJsonFile<GlobalSettings>(settingsPath, DEFAULT_GLOBAL_SETTINGS);
 
+    // Migrate legacy enhancementModel/validationModel to phaseModels
+    const migratedPhaseModels = this.migratePhaseModels(settings);
+
     // Apply any missing defaults (for backwards compatibility)
-    return {
+    let result: GlobalSettings = {
       ...DEFAULT_GLOBAL_SETTINGS,
       ...settings,
       keyboardShortcuts: {
         ...DEFAULT_GLOBAL_SETTINGS.keyboardShortcuts,
         ...settings.keyboardShortcuts,
       },
+      phaseModels: migratedPhaseModels,
     };
+
+    // Version-based migrations
+    const storedVersion = settings.version || 1;
+    let needsSave = false;
+
+    // Migration v2 -> v3: Convert string phase models to PhaseModelEntry objects
+    // Note: migratePhaseModels() handles the actual conversion for both v1 and v2 formats
+    if (storedVersion < 3) {
+      logger.info(
+        `Migrating settings from v${storedVersion} to v3: converting phase models to PhaseModelEntry format`
+      );
+      needsSave = true;
+    }
+
+    // Migration v3 -> v4: Add onboarding/setup wizard state fields
+    // Older settings files never stored setup state in settings.json (it lived in localStorage),
+    // so default to "setup complete" for existing installs to avoid forcing re-onboarding.
+    if (storedVersion < 4) {
+      if (settings.setupComplete === undefined) result.setupComplete = true;
+      if (settings.isFirstRun === undefined) result.isFirstRun = false;
+      if (settings.skipClaudeSetup === undefined) result.skipClaudeSetup = false;
+      needsSave = true;
+    }
+
+    // Update version if any migration occurred
+    if (needsSave) {
+      result.version = SETTINGS_VERSION;
+    }
+
+    // Save migrated settings if needed
+    if (needsSave) {
+      try {
+        await ensureDataDir(this.dataDir);
+        await atomicWriteJson(settingsPath, result);
+        logger.info('Settings migration complete');
+      } catch (error) {
+        logger.error('Failed to save migrated settings:', error);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Migrate legacy enhancementModel/validationModel fields to phaseModels structure
+   *
+   * Handles backwards compatibility for settings created before phaseModels existed.
+   * Also handles migration from string phase models (v2) to PhaseModelEntry objects (v3).
+   * Legacy fields take precedence over defaults but phaseModels takes precedence over legacy.
+   *
+   * @param settings - Raw settings from file
+   * @returns Complete PhaseModelConfig with all fields populated
+   */
+  private migratePhaseModels(settings: Partial<GlobalSettings>): PhaseModelConfig {
+    // Start with defaults
+    const result: PhaseModelConfig = { ...DEFAULT_PHASE_MODELS };
+
+    // If phaseModels exists, use it (with defaults for any missing fields)
+    if (settings.phaseModels) {
+      // Merge with defaults and convert any string values to PhaseModelEntry
+      const merged: PhaseModelConfig = { ...DEFAULT_PHASE_MODELS };
+      for (const key of Object.keys(settings.phaseModels) as Array<keyof PhaseModelConfig>) {
+        const value = settings.phaseModels[key];
+        if (value !== undefined) {
+          // Convert string to PhaseModelEntry if needed (v2 -> v3 migration)
+          merged[key] = this.toPhaseModelEntry(value);
+        }
+      }
+      return merged;
+    }
+
+    // Migrate legacy fields if phaseModels doesn't exist
+    // These were the only two legacy fields that existed
+    if (settings.enhancementModel) {
+      result.enhancementModel = this.toPhaseModelEntry(settings.enhancementModel);
+      logger.debug(`Migrated legacy enhancementModel: ${settings.enhancementModel}`);
+    }
+    if (settings.validationModel) {
+      result.validationModel = this.toPhaseModelEntry(settings.validationModel);
+      logger.debug(`Migrated legacy validationModel: ${settings.validationModel}`);
+    }
+
+    return result;
+  }
+
+  /**
+   * Convert a phase model value to PhaseModelEntry format
+   *
+   * Handles migration from string format (v2) to object format (v3).
+   * - String values like 'sonnet' become { model: 'sonnet' }
+   * - Object values are returned as-is (with type assertion)
+   *
+   * @param value - Phase model value (string or PhaseModelEntry)
+   * @returns PhaseModelEntry object
+   */
+  private toPhaseModelEntry(value: string | PhaseModelEntry): PhaseModelEntry {
+    if (typeof value === 'string') {
+      // v2 format: just a model string
+      return { model: value as PhaseModelEntry['model'] };
+    }
+    // v3 format: already a PhaseModelEntry object
+    return value;
   }
 
   /**
@@ -155,17 +265,78 @@ export class SettingsService {
     const settingsPath = getGlobalSettingsPath(this.dataDir);
 
     const current = await this.getGlobalSettings();
+
+    // Guard against destructive "empty array/object" overwrites.
+    // During auth transitions, the UI can briefly have default/empty state and accidentally
+    // sync it, wiping persisted settings (especially `projects`).
+    const sanitizedUpdates: Partial<GlobalSettings> = { ...updates };
+    let attemptedProjectWipe = false;
+
+    const ignoreEmptyArrayOverwrite = <K extends keyof GlobalSettings>(key: K): void => {
+      const nextVal = sanitizedUpdates[key] as unknown;
+      const curVal = current[key] as unknown;
+      if (
+        Array.isArray(nextVal) &&
+        nextVal.length === 0 &&
+        Array.isArray(curVal) &&
+        curVal.length > 0
+      ) {
+        delete sanitizedUpdates[key];
+      }
+    };
+
+    const currentProjectsLen = Array.isArray(current.projects) ? current.projects.length : 0;
+    if (
+      Array.isArray(sanitizedUpdates.projects) &&
+      sanitizedUpdates.projects.length === 0 &&
+      currentProjectsLen > 0
+    ) {
+      attemptedProjectWipe = true;
+      delete sanitizedUpdates.projects;
+    }
+
+    ignoreEmptyArrayOverwrite('trashedProjects');
+    ignoreEmptyArrayOverwrite('projectHistory');
+    ignoreEmptyArrayOverwrite('recentFolders');
+    ignoreEmptyArrayOverwrite('mcpServers');
+    ignoreEmptyArrayOverwrite('enabledCursorModels');
+
+    // Empty object overwrite guard
+    if (
+      sanitizedUpdates.lastSelectedSessionByProject &&
+      typeof sanitizedUpdates.lastSelectedSessionByProject === 'object' &&
+      !Array.isArray(sanitizedUpdates.lastSelectedSessionByProject) &&
+      Object.keys(sanitizedUpdates.lastSelectedSessionByProject).length === 0 &&
+      current.lastSelectedSessionByProject &&
+      Object.keys(current.lastSelectedSessionByProject).length > 0
+    ) {
+      delete sanitizedUpdates.lastSelectedSessionByProject;
+    }
+
+    // If a request attempted to wipe projects, also ignore theme changes in that same request.
+    if (attemptedProjectWipe) {
+      delete sanitizedUpdates.theme;
+    }
+
     const updated: GlobalSettings = {
       ...current,
-      ...updates,
+      ...sanitizedUpdates,
       version: SETTINGS_VERSION,
     };
 
     // Deep merge keyboard shortcuts if provided
-    if (updates.keyboardShortcuts) {
+    if (sanitizedUpdates.keyboardShortcuts) {
       updated.keyboardShortcuts = {
         ...current.keyboardShortcuts,
-        ...updates.keyboardShortcuts,
+        ...sanitizedUpdates.keyboardShortcuts,
+      };
+    }
+
+    // Deep merge phaseModels if provided
+    if (sanitizedUpdates.phaseModels) {
+      updated.phaseModels = {
+        ...current.phaseModels,
+        ...sanitizedUpdates.phaseModels,
       };
     }
 
@@ -260,6 +431,8 @@ export class SettingsService {
    */
   async getMaskedCredentials(): Promise<{
     anthropic: { configured: boolean; masked: string };
+    google: { configured: boolean; masked: string };
+    openai: { configured: boolean; masked: string };
   }> {
     const credentials = await this.getCredentials();
 
@@ -272,6 +445,14 @@ export class SettingsService {
       anthropic: {
         configured: !!credentials.apiKeys.anthropic,
         masked: maskKey(credentials.apiKeys.anthropic),
+      },
+      google: {
+        configured: !!credentials.apiKeys.google,
+        masked: maskKey(credentials.apiKeys.google),
+      },
+      openai: {
+        configured: !!credentials.apiKeys.openai,
+        masked: maskKey(credentials.apiKeys.openai),
       },
     };
   }
@@ -406,13 +587,29 @@ export class SettingsService {
         }
       }
 
+      // Parse setup wizard state (previously stored in localStorage)
+      let setupState: Record<string, unknown> = {};
+      if (localStorageData['automaker-setup']) {
+        try {
+          const parsed = JSON.parse(localStorageData['automaker-setup']);
+          setupState = parsed.state || parsed;
+        } catch (e) {
+          errors.push(`Failed to parse automaker-setup: ${e}`);
+        }
+      }
+
       // Extract global settings
       const globalSettings: Partial<GlobalSettings> = {
+        setupComplete:
+          setupState.setupComplete !== undefined ? (setupState.setupComplete as boolean) : false,
+        isFirstRun: setupState.isFirstRun !== undefined ? (setupState.isFirstRun as boolean) : true,
+        skipClaudeSetup:
+          setupState.skipClaudeSetup !== undefined
+            ? (setupState.skipClaudeSetup as boolean)
+            : false,
         theme: (appState.theme as GlobalSettings['theme']) || 'dark',
         sidebarOpen: appState.sidebarOpen !== undefined ? (appState.sidebarOpen as boolean) : true,
         chatHistoryOpen: (appState.chatHistoryOpen as boolean) || false,
-        kanbanCardDetailLevel:
-          (appState.kanbanCardDetailLevel as GlobalSettings['kanbanCardDetailLevel']) || 'standard',
         maxConcurrency: (appState.maxConcurrency as number) || 3,
         defaultSkipTests:
           appState.defaultSkipTests !== undefined ? (appState.defaultSkipTests as boolean) : true,
@@ -420,19 +617,21 @@ export class SettingsService {
           appState.enableDependencyBlocking !== undefined
             ? (appState.enableDependencyBlocking as boolean)
             : true,
-        useWorktrees: (appState.useWorktrees as boolean) || false,
-        showProfilesOnly: (appState.showProfilesOnly as boolean) || false,
+        skipVerificationInAutoMode:
+          appState.skipVerificationInAutoMode !== undefined
+            ? (appState.skipVerificationInAutoMode as boolean)
+            : false,
+        useWorktrees:
+          appState.useWorktrees !== undefined ? (appState.useWorktrees as boolean) : true,
         defaultPlanningMode:
           (appState.defaultPlanningMode as GlobalSettings['defaultPlanningMode']) || 'skip',
         defaultRequirePlanApproval: (appState.defaultRequirePlanApproval as boolean) || false,
-        defaultAIProfileId: (appState.defaultAIProfileId as string | null) || null,
         muteDoneSound: (appState.muteDoneSound as boolean) || false,
         enhancementModel:
           (appState.enhancementModel as GlobalSettings['enhancementModel']) || 'sonnet',
         keyboardShortcuts:
           (appState.keyboardShortcuts as KeyboardShortcuts) ||
           DEFAULT_GLOBAL_SETTINGS.keyboardShortcuts,
-        aiProfiles: (appState.aiProfiles as AIProfile[]) || [],
         projects: (appState.projects as ProjectRef[]) || [],
         trashedProjects: (appState.trashedProjects as TrashedProjectRef[]) || [],
         projectHistory: (appState.projectHistory as string[]) || [],

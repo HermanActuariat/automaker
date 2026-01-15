@@ -1,17 +1,19 @@
 /**
  * POST /enhance-prompt endpoint - Enhance user input text
  *
- * Uses Claude AI to enhance text based on the specified enhancement mode.
- * Supports modes: improve, technical, simplify, acceptance
+ * Uses the provider abstraction to enhance text based on the specified
+ * enhancement mode. Works with any configured provider (Claude, Cursor, etc.).
+ * Supports modes: improve, technical, simplify, acceptance, ux-reviewer
  */
 
 import type { Request, Response } from 'express';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createLogger } from '@automaker/utils';
 import { resolveModelString } from '@automaker/model-resolver';
-import { CLAUDE_MODEL_MAP } from '@automaker/types';
+import { CLAUDE_MODEL_MAP, type ThinkingLevel } from '@automaker/types';
+import { simpleQuery } from '../../../providers/simple-query-service.js';
+import type { SettingsService } from '../../../services/settings-service.js';
+import { getPromptCustomization } from '../../../lib/settings-helpers.js';
 import {
-  getSystemPrompt,
   buildUserPrompt,
   isValidEnhancementMode,
   type EnhancementMode,
@@ -29,6 +31,8 @@ interface EnhanceRequestBody {
   enhancementMode: string;
   /** Optional model override */
   model?: string;
+  /** Optional thinking level for Claude models */
+  thinkingLevel?: ThinkingLevel;
 }
 
 /**
@@ -48,47 +52,18 @@ interface EnhanceErrorResponse {
 }
 
 /**
- * Extract text content from Claude SDK response messages
- *
- * @param stream - The async iterable from the query function
- * @returns The extracted text content
- */
-async function extractTextFromStream(
-  stream: AsyncIterable<{
-    type: string;
-    subtype?: string;
-    result?: string;
-    message?: {
-      content?: Array<{ type: string; text?: string }>;
-    };
-  }>
-): Promise<string> {
-  let responseText = '';
-
-  for await (const msg of stream) {
-    if (msg.type === 'assistant' && msg.message?.content) {
-      for (const block of msg.message.content) {
-        if (block.type === 'text' && block.text) {
-          responseText += block.text;
-        }
-      }
-    } else if (msg.type === 'result' && msg.subtype === 'success') {
-      responseText = msg.result || responseText;
-    }
-  }
-
-  return responseText;
-}
-
-/**
  * Create the enhance request handler
  *
+ * @param settingsService - Optional settings service for loading custom prompts
  * @returns Express request handler for text enhancement
  */
-export function createEnhanceHandler(): (req: Request, res: Response) => Promise<void> {
+export function createEnhanceHandler(
+  settingsService?: SettingsService
+): (req: Request, res: Response) => Promise<void> {
   return async (req: Request, res: Response): Promise<void> => {
     try {
-      const { originalText, enhancementMode, model } = req.body as EnhanceRequestBody;
+      const { originalText, enhancementMode, model, thinkingLevel } =
+        req.body as EnhanceRequestBody;
 
       // Validate required fields
       if (!originalText || typeof originalText !== 'string') {
@@ -128,11 +103,22 @@ export function createEnhanceHandler(): (req: Request, res: Response) => Promise
 
       logger.info(`Enhancing text with mode: ${validMode}, length: ${trimmedText.length} chars`);
 
-      // Get the system prompt for this mode
-      const systemPrompt = getSystemPrompt(validMode);
+      // Load enhancement prompts from settings (merges custom + defaults)
+      const prompts = await getPromptCustomization(settingsService, '[EnhancePrompt]');
+
+      // Get the system prompt for this mode from merged prompts
+      const systemPromptMap: Record<EnhancementMode, string> = {
+        improve: prompts.enhancement.improveSystemPrompt,
+        technical: prompts.enhancement.technicalSystemPrompt,
+        simplify: prompts.enhancement.simplifySystemPrompt,
+        acceptance: prompts.enhancement.acceptanceSystemPrompt,
+        'ux-reviewer': prompts.enhancement.uxReviewerSystemPrompt,
+      };
+      const systemPrompt = systemPromptMap[validMode];
+
+      logger.debug(`Using ${validMode} system prompt (length: ${systemPrompt.length} chars)`);
 
       // Build the user prompt with few-shot examples
-      // This helps the model understand this is text transformation, not a coding task
       const userPrompt = buildUserPrompt(validMode, trimmedText, true);
 
       // Resolve the model - use the passed model, default to sonnet for quality
@@ -140,24 +126,23 @@ export function createEnhanceHandler(): (req: Request, res: Response) => Promise
 
       logger.debug(`Using model: ${resolvedModel}`);
 
-      // Call Claude SDK with minimal configuration for text transformation
-      // Key: no tools, just text completion
-      const stream = query({
-        prompt: userPrompt,
-        options: {
-          model: resolvedModel,
-          systemPrompt,
-          maxTurns: 1,
-          allowedTools: [],
-          permissionMode: 'acceptEdits',
-        },
+      // Use simpleQuery - provider abstraction handles routing to correct provider
+      // The system prompt is combined with user prompt since some providers
+      // don't have a separate system prompt concept
+      const result = await simpleQuery({
+        prompt: `${systemPrompt}\n\n${userPrompt}`,
+        model: resolvedModel,
+        cwd: process.cwd(), // Enhancement doesn't need a specific working directory
+        maxTurns: 1,
+        allowedTools: [],
+        thinkingLevel,
+        readOnly: true, // Prompt enhancement only generates text, doesn't write files
       });
 
-      // Extract the enhanced text from the response
-      const enhancedText = await extractTextFromStream(stream);
+      const enhancedText = result.text;
 
       if (!enhancedText || enhancedText.trim().length === 0) {
-        logger.warn('Received empty response from Claude');
+        logger.warn('Received empty response from AI');
         const response: EnhanceErrorResponse = {
           success: false,
           error: 'Failed to generate enhanced text - empty response',

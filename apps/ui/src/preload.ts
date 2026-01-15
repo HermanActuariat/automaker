@@ -6,6 +6,9 @@
  */
 
 import { contextBridge, ipcRenderer, OpenDialogOptions, SaveDialogOptions } from 'electron';
+import { createLogger } from '@automaker/utils/logger';
+
+const logger = createLogger('Preload');
 
 // Expose minimal API for native features
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -18,6 +21,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Get server URL for HTTP client
   getServerUrl: (): Promise<string> => ipcRenderer.invoke('server:getUrl'),
+
+  // Get API key for authentication
+  getApiKey: (): Promise<string | null> => ipcRenderer.invoke('auth:getApiKey'),
+
+  // Check if running in external server mode (Docker API)
+  isExternalServerMode: (): Promise<boolean> => ipcRenderer.invoke('auth:isExternalServerMode'),
 
   // Native dialogs - better UX than prompt()
   openDirectory: (): Promise<Electron.OpenDialogReturnValue> =>
@@ -47,6 +56,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Window management
   updateMinWidth: (sidebarExpanded: boolean): Promise<void> =>
     ipcRenderer.invoke('window:updateMinWidth', sidebarExpanded),
+
+  // App control
+  quit: (): Promise<void> => ipcRenderer.invoke('app:quit'),
 });
 
-console.log('[Preload] Electron API exposed (TypeScript)');
+logger.info('Electron API exposed (TypeScript)');

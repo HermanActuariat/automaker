@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/ui/public/readme_logo.png" alt="Automaker Logo" height="80" />
+  <img src="apps/ui/public/readme_logo.svg" alt="Automaker Logo" height="80" />
 </p>
 
 > **[!TIP]**
@@ -81,22 +81,6 @@ Automaker leverages the [Claude Agent SDK](https://www.npmjs.com/package/@anthro
 
 The future of software development is **agentic coding**—where developers become architects directing AI agents rather than manual coders. Automaker puts this future in your hands today, letting you experience what it's like to build software 10x faster with AI agents handling the implementation while you focus on architecture and business logic.
 
----
-
-> **[!CAUTION]**
->
-> ## Security Disclaimer
->
-> **This software uses AI-powered tooling that has access to your operating system and can read, modify, and delete files. Use at your own risk.**
->
-> We have reviewed this codebase for security vulnerabilities, but you assume all risk when running this software. You should review the code yourself before running it.
->
-> **We do not recommend running Automaker directly on your local computer** due to the risk of AI agents having access to your entire file system. Please sandbox this application using Docker or a virtual machine.
->
-> **[Read the full disclaimer](./DISCLAIMER.md)**
-
----
-
 ## Community & Support
 
 Join the **Agentic Jumpstart** to connect with other builders exploring **agentic coding** and autonomous development workflows.
@@ -133,32 +117,32 @@ cd automaker
 # 2. Install dependencies
 npm install
 
-# 3. Build shared packages (Now can be skipped npm install / run dev does it automaticly)
+# 3. Build shared packages (can be skipped - npm run dev does it automatically)
 npm run build:packages
 
-# 4. Set up authentication (skip if using Claude Code CLI)
-# If using Claude Code CLI: credentials are detected automatically
-# If using API key directly, choose one method:
-
-# Option A: Environment variable
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# Option B: Create .env file in project root
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
-
-# 5. Start Automaker (interactive launcher)
+# 4. Start Automaker
 npm run dev
 # Choose between:
 #   1. Web Application (browser at localhost:3007)
 #   2. Desktop Application (Electron - recommended)
 ```
 
-**Note:** The `npm run dev` command will:
+**Authentication Setup:** On first run, Automaker will automatically show a setup wizard where you can configure authentication. You can choose to:
 
-- Check for dependencies and install if needed
-- Install Playwright browsers for E2E tests
-- Kill any processes on ports 3007/3008
-- Present an interactive menu to choose your run mode
+- Use **Claude Code CLI** (recommended) - Automaker will detect your CLI credentials automatically
+- Enter an **API key** directly in the wizard
+
+If you prefer to set up authentication before running (e.g., for headless deployments or CI/CD), you can set it manually:
+
+```bash
+# Option A: Environment variable
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Option B: Create .env file in project root
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+```
+
+**For Development:** `npm run dev` starts the development server with Vite live reload and hot module replacement for fast refresh and instant updates as you make changes.
 
 ## How to Run
 
@@ -202,9 +186,6 @@ npm run dev:web
 ```bash
 # Build for web deployment (uses Vite)
 npm run build
-
-# Run production build
-npm run start
 ```
 
 #### Desktop Application
@@ -223,13 +204,110 @@ npm run build:electron:linux   # Linux (AppImage + DEB, x64)
 
 #### Docker Deployment
 
+Docker provides the most secure way to run Automaker by isolating it from your host filesystem.
+
 ```bash
-# Build and run with Docker Compose (recommended for security)
+# Build and run with Docker Compose
 docker-compose up -d
 
-# Access at http://localhost:3007
+# Access UI at http://localhost:3007
 # API at http://localhost:3008
+
+# View logs
+docker-compose logs -f
+
+# Stop containers
+docker-compose down
 ```
+
+##### Configuration
+
+Create a `.env` file in the project root if using API key authentication:
+
+```bash
+# Optional: Anthropic API key (not needed if using Claude CLI authentication)
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Note:** Most users authenticate via Claude CLI instead of API keys. See [Claude CLI Authentication](#claude-cli-authentication-optional) below.
+
+##### Working with Projects (Host Directory Access)
+
+By default, the container is isolated from your host filesystem. To work on projects from your host machine, create a `docker-compose.override.yml` file (gitignored):
+
+```yaml
+services:
+  server:
+    volumes:
+      # Mount your project directories
+      - /path/to/your/project:/projects/your-project
+```
+
+##### Claude CLI Authentication (Optional)
+
+To use Claude Code CLI authentication instead of an API key, mount your Claude CLI config directory:
+
+```yaml
+services:
+  server:
+    volumes:
+      # Linux/macOS
+      - ~/.claude:/home/automaker/.claude
+      # Windows
+      - C:/Users/YourName/.claude:/home/automaker/.claude
+```
+
+**Note:** The Claude CLI config must be writable (do not use `:ro` flag) as the CLI writes debug files.
+
+##### GitHub CLI Authentication (For Git Push/PR Operations)
+
+To enable git push and GitHub CLI operations inside the container:
+
+```yaml
+services:
+  server:
+    volumes:
+      # Mount GitHub CLI config
+      # Linux/macOS
+      - ~/.config/gh:/home/automaker/.config/gh
+      # Windows
+      - 'C:/Users/YourName/AppData/Roaming/GitHub CLI:/home/automaker/.config/gh'
+
+      # Mount git config for user identity (name, email)
+      - ~/.gitconfig:/home/automaker/.gitconfig:ro
+    environment:
+      # GitHub token (required on Windows where tokens are in Credential Manager)
+      # Get your token with: gh auth token
+      - GH_TOKEN=${GH_TOKEN}
+```
+
+Then add `GH_TOKEN` to your `.env` file:
+
+```bash
+GH_TOKEN=gho_your_github_token_here
+```
+
+##### Complete docker-compose.override.yml Example
+
+```yaml
+services:
+  server:
+    volumes:
+      # Your projects
+      - /path/to/project1:/projects/project1
+      - /path/to/project2:/projects/project2
+
+      # Authentication configs
+      - ~/.claude:/home/automaker/.claude
+      - ~/.config/gh:/home/automaker/.config/gh
+      - ~/.gitconfig:/home/automaker/.gitconfig:ro
+    environment:
+      - GH_TOKEN=${GH_TOKEN}
+```
+
+##### Architecture Support
+
+The Docker image supports both AMD64 and ARM64 architectures. The GitHub CLI and Claude CLI are automatically downloaded for the correct architecture during build.
 
 ### Testing
 
@@ -527,10 +605,27 @@ data/
     └── {sessionId}.json
 ```
 
+---
+
+> **[!CAUTION]**
+>
+> ## Security Disclaimer
+>
+> **This software uses AI-powered tooling that has access to your operating system and can read, modify, and delete files. Use at your own risk.**
+>
+> We have reviewed this codebase for security vulnerabilities, but you assume all risk when running this software. You should review the code yourself before running it.
+>
+> **We do not recommend running Automaker directly on your local computer** due to the risk of AI agents having access to your entire file system. Please sandbox this application using Docker or a virtual machine.
+>
+> **[Read the full disclaimer](./DISCLAIMER.md)**
+
+---
+
 ## Learn More
 
 ### Documentation
 
+- [Contributing Guide](./CONTRIBUTING.md) - How to contribute to Automaker
 - [Project Documentation](./docs/) - Architecture guides, patterns, and developer docs
 - [Docker Isolation Guide](./docs/docker-isolation.md) - Security-focused Docker deployment
 - [Shared Packages Guide](./docs/llm-shared-packages.md) - Using monorepo packages

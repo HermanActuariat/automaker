@@ -10,11 +10,12 @@ export interface OSDetectionResult {
 }
 
 function detectOS(): OperatingSystem {
-  // Check Electron's process.platform first (most reliable in Electron apps)
-  if (typeof process !== 'undefined' && process.platform) {
-    if (process.platform === 'darwin') return 'mac';
-    if (process.platform === 'win32') return 'windows';
-    if (process.platform === 'linux') return 'linux';
+  // Check Electron's exposed platform first (via preload contextBridge)
+  if (typeof window !== 'undefined' && window.electronAPI?.platform) {
+    const platform = window.electronAPI.platform;
+    if (platform === 'darwin') return 'mac';
+    if (platform === 'win32') return 'windows';
+    if (platform === 'linux') return 'linux';
   }
 
   if (typeof navigator === 'undefined') {

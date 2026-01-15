@@ -1,11 +1,16 @@
 /**
  * Business logic for generating suggestions
+ *
+ * Model is configurable via phaseModels.suggestionsModel in settings
+ * (AI Suggestions in the UI). Supports both Claude and Cursor models.
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { EventEmitter } from '../../lib/events.js';
 import { createLogger } from '@automaker/utils';
-import { createSuggestionsOptions } from '../../lib/sdk-options.js';
+import { DEFAULT_PHASE_MODELS, isCursorModel, type ThinkingLevel } from '@automaker/types';
+import { resolvePhaseModel } from '@automaker/model-resolver';
+import { extractJsonWithArray } from '../../lib/json-extractor.js';
+import { streamingQuery } from '../../providers/simple-query-service.js';
 import { FeatureLoader } from '../../services/feature-loader.js';
 import { getAppSpecPath } from '@automaker/platform';
 import * as secureFs from '../../lib/secure-fs.js';
@@ -128,7 +133,9 @@ export async function generateSuggestions(
   suggestionType: string,
   events: EventEmitter,
   abortController: AbortController,
-  settingsService?: SettingsService
+  settingsService?: SettingsService,
+  modelOverride?: string,
+  thinkingLevelOverride?: ThinkingLevel
 ): Promise<void> {
   const typePrompts: Record<string, string> = {
     features: 'Analyze this project and suggest new features that would add value.',
@@ -164,61 +171,103 @@ The response will be automatically formatted as structured JSON.`;
     '[Suggestions]'
   );
 
-  const options = createSuggestionsOptions({
+  // Get model from phase settings (AI Suggestions = suggestionsModel)
+  // Use override if provided, otherwise fall back to settings
+  const settings = await settingsService?.getGlobalSettings();
+  let model: string;
+  let thinkingLevel: ThinkingLevel | undefined;
+
+  if (modelOverride) {
+    // Use explicit override - resolve the model string
+    const resolved = resolvePhaseModel({
+      model: modelOverride,
+      thinkingLevel: thinkingLevelOverride,
+    });
+    model = resolved.model;
+    thinkingLevel = resolved.thinkingLevel;
+  } else {
+    // Use settings-based model
+    const phaseModelEntry =
+      settings?.phaseModels?.suggestionsModel || DEFAULT_PHASE_MODELS.suggestionsModel;
+    const resolved = resolvePhaseModel(phaseModelEntry);
+    model = resolved.model;
+    thinkingLevel = resolved.thinkingLevel;
+  }
+
+  logger.info('[Suggestions] Using model:', model);
+
+  let responseText = '';
+
+  // Determine if we should use structured output (Claude supports it, Cursor doesn't)
+  const useStructuredOutput = !isCursorModel(model);
+
+  // Build the final prompt - for Cursor, include JSON schema instructions
+  let finalPrompt = prompt;
+  if (!useStructuredOutput) {
+    finalPrompt = `${prompt}
+
+CRITICAL INSTRUCTIONS:
+1. DO NOT write any files. Return the JSON in your response only.
+2. After analyzing the project, respond with ONLY a JSON object - no explanations, no markdown, just raw JSON.
+3. The JSON must match this exact schema:
+
+${JSON.stringify(suggestionsSchema, null, 2)}
+
+Your entire response should be valid JSON starting with { and ending with }. No text before or after.`;
+  }
+
+  // Use streamingQuery with event callbacks
+  const result = await streamingQuery({
+    prompt: finalPrompt,
+    model,
     cwd: projectPath,
+    maxTurns: 250,
+    allowedTools: ['Read', 'Glob', 'Grep'],
     abortController,
-    autoLoadClaudeMd,
-    outputFormat: {
-      type: 'json_schema',
-      schema: suggestionsSchema,
+    thinkingLevel,
+    readOnly: true, // Suggestions only reads code, doesn't write
+    settingSources: autoLoadClaudeMd ? ['user', 'project', 'local'] : undefined,
+    outputFormat: useStructuredOutput
+      ? {
+          type: 'json_schema',
+          schema: suggestionsSchema,
+        }
+      : undefined,
+    onText: (text) => {
+      responseText += text;
+      events.emit('suggestions:event', {
+        type: 'suggestions_progress',
+        content: text,
+      });
+    },
+    onToolUse: (tool, input) => {
+      events.emit('suggestions:event', {
+        type: 'suggestions_tool',
+        tool,
+        input,
+      });
     },
   });
 
-  const stream = query({ prompt, options });
-  let responseText = '';
-  let structuredOutput: { suggestions: Array<Record<string, unknown>> } | null = null;
-
-  for await (const msg of stream) {
-    if (msg.type === 'assistant' && msg.message.content) {
-      for (const block of msg.message.content) {
-        if (block.type === 'text') {
-          responseText += block.text;
-          events.emit('suggestions:event', {
-            type: 'suggestions_progress',
-            content: block.text,
-          });
-        } else if (block.type === 'tool_use') {
-          events.emit('suggestions:event', {
-            type: 'suggestions_tool',
-            tool: block.name,
-            input: block.input,
-          });
-        }
-      }
-    } else if (msg.type === 'result' && msg.subtype === 'success') {
-      // Check for structured output
-      const resultMsg = msg as any;
-      if (resultMsg.structured_output) {
-        structuredOutput = resultMsg.structured_output as {
-          suggestions: Array<Record<string, unknown>>;
-        };
-        logger.debug('Received structured output:', structuredOutput);
-      }
-    } else if (msg.type === 'result') {
-      const resultMsg = msg as any;
-      if (resultMsg.subtype === 'error_max_structured_output_retries') {
-        logger.error('Failed to produce valid structured output after retries');
-        throw new Error('Could not produce valid suggestions output');
-      } else if (resultMsg.subtype === 'error_max_turns') {
-        logger.error('Hit max turns limit before completing suggestions generation');
-        logger.warn(`Response text length: ${responseText.length} chars`);
-        // Still try to parse what we have
-      }
-    }
-  }
-
   // Use structured output if available, otherwise fall back to parsing text
   try {
+    let structuredOutput: { suggestions: Array<Record<string, unknown>> } | null = null;
+
+    if (result.structured_output) {
+      structuredOutput = result.structured_output as {
+        suggestions: Array<Record<string, unknown>>;
+      };
+      logger.debug('Received structured output:', structuredOutput);
+    } else if (responseText) {
+      // Fallback: try to parse from text using shared extraction utility
+      logger.warn('No structured output received, attempting to parse from text');
+      structuredOutput = extractJsonWithArray<{ suggestions: Array<Record<string, unknown>> }>(
+        responseText,
+        'suggestions',
+        { logger }
+      );
+    }
+
     if (structuredOutput && structuredOutput.suggestions) {
       // Use structured output directly
       events.emit('suggestions:event', {
@@ -229,21 +278,7 @@ The response will be automatically formatted as structured JSON.`;
         })),
       });
     } else {
-      // Fallback: try to parse from text (for backwards compatibility)
-      logger.warn('No structured output received, attempting to parse from text');
-      const jsonMatch = responseText.match(/\{[\s\S]*"suggestions"[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        events.emit('suggestions:event', {
-          type: 'suggestions_complete',
-          suggestions: parsed.suggestions.map((s: Record<string, unknown>, i: number) => ({
-            ...s,
-            id: s.id || `suggestion-${Date.now()}-${i}`,
-          })),
-        });
-      } else {
-        throw new Error('No valid JSON found in response');
-      }
+      throw new Error('No valid JSON found in response');
     }
   } catch (error) {
     // Log the parsing error for debugging

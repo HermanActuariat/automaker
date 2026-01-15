@@ -26,6 +26,25 @@ export type EventType =
   | 'project:analysis-error'
   | 'suggestions:event'
   | 'spec-regeneration:event'
-  | 'issue-validation:event';
+  | 'issue-validation:event'
+  | 'ideation:stream'
+  | 'ideation:session-started'
+  | 'ideation:session-ended'
+  | 'ideation:analysis'
+  | 'ideation:analysis-started'
+  | 'ideation:analysis-progress'
+  | 'ideation:analysis-complete'
+  | 'ideation:analysis-error'
+  | 'ideation:suggestions'
+  | 'ideation:idea-created'
+  | 'ideation:idea-updated'
+  | 'ideation:idea-deleted'
+  | 'ideation:idea-converted'
+  | 'worktree:init-started'
+  | 'worktree:init-output'
+  | 'worktree:init-completed'
+  | 'dev-server:started'
+  | 'dev-server:output'
+  | 'dev-server:stopped';
 
 export type EventCallback = (type: EventType, payload: unknown) => void;

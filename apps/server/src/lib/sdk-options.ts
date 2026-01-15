@@ -18,8 +18,79 @@
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import path from 'path';
 import { resolveModelString } from '@automaker/model-resolver';
-import { DEFAULT_MODELS, CLAUDE_MODEL_MAP } from '@automaker/types';
+import { createLogger } from '@automaker/utils';
+
+const logger = createLogger('SdkOptions');
+import {
+  DEFAULT_MODELS,
+  CLAUDE_MODEL_MAP,
+  type McpServerConfig,
+  type ThinkingLevel,
+  getThinkingTokenBudget,
+} from '@automaker/types';
 import { isPathAllowed, PathNotAllowedError, getAllowedRootDirectory } from '@automaker/platform';
+
+/**
+ * Result of sandbox compatibility check
+ */
+export interface SandboxCompatibilityResult {
+  /** Whether sandbox mode can be enabled for this path */
+  enabled: boolean;
+  /** Optional message explaining why sandbox is disabled */
+  message?: string;
+}
+
+/**
+ * Check if a working directory is compatible with sandbox mode.
+ * Some paths (like cloud storage mounts) may not work with sandboxed execution.
+ *
+ * @param cwd - The working directory to check
+ * @param sandboxRequested - Whether sandbox mode was requested by settings
+ * @returns Object indicating if sandbox can be enabled and why not if disabled
+ */
+export function checkSandboxCompatibility(
+  cwd: string,
+  sandboxRequested: boolean
+): SandboxCompatibilityResult {
+  if (!sandboxRequested) {
+    return { enabled: false };
+  }
+
+  const resolvedCwd = path.resolve(cwd);
+
+  // Check for cloud storage paths that may not be compatible with sandbox
+  const cloudStoragePatterns = [
+    // macOS mounted volumes
+    /^\/Volumes\/GoogleDrive/i,
+    /^\/Volumes\/Dropbox/i,
+    /^\/Volumes\/OneDrive/i,
+    /^\/Volumes\/iCloud/i,
+    // macOS home directory
+    /^\/Users\/[^/]+\/Google Drive/i,
+    /^\/Users\/[^/]+\/Dropbox/i,
+    /^\/Users\/[^/]+\/OneDrive/i,
+    /^\/Users\/[^/]+\/Library\/Mobile Documents/i, // iCloud
+    // Linux home directory
+    /^\/home\/[^/]+\/Google Drive/i,
+    /^\/home\/[^/]+\/Dropbox/i,
+    /^\/home\/[^/]+\/OneDrive/i,
+    // Windows
+    /^C:\\Users\\[^\\]+\\Google Drive/i,
+    /^C:\\Users\\[^\\]+\\Dropbox/i,
+    /^C:\\Users\\[^\\]+\\OneDrive/i,
+  ];
+
+  for (const pattern of cloudStoragePatterns) {
+    if (pattern.test(resolvedCwd)) {
+      return {
+        enabled: false,
+        message: `Sandbox disabled: Cloud storage path detected (${resolvedCwd}). Sandbox mode may not work correctly with cloud-synced directories.`,
+      };
+    }
+  }
+
+  return { enabled: true };
+}
 
 /**
  * Validate that a working directory is allowed by ALLOWED_ROOT_DIRECTORY.
@@ -58,10 +129,30 @@ export const TOOL_PRESETS = {
   specGeneration: ['Read', 'Glob', 'Grep'] as const,
 
   /** Full tool access for feature implementation */
-  fullAccess: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const,
+  fullAccess: [
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'Bash',
+    'WebSearch',
+    'WebFetch',
+    'TodoWrite',
+  ] as const,
 
   /** Tools for chat/interactive mode */
-  chat: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const,
+  chat: [
+    'Read',
+    'Write',
+    'Edit',
+    'Glob',
+    'Grep',
+    'Bash',
+    'WebSearch',
+    'WebFetch',
+    'TodoWrite',
+  ] as const,
 } as const;
 
 /**
@@ -129,11 +220,49 @@ export function getModelForUseCase(
 
 /**
  * Base options that apply to all SDK calls
+ * AUTONOMOUS MODE: Always bypass permissions for fully autonomous operation
  */
 function getBaseOptions(): Partial<Options> {
   return {
-    permissionMode: 'acceptEdits',
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
   };
+}
+
+/**
+ * MCP options result
+ */
+interface McpOptions {
+  /** Options to spread for MCP servers */
+  mcpServerOptions: Partial<Options>;
+}
+
+/**
+ * Build MCP-related options based on configuration.
+ *
+ * @param config - The SDK options config
+ * @returns Object with MCP server settings to spread into final options
+ */
+function buildMcpOptions(config: CreateSdkOptionsConfig): McpOptions {
+  return {
+    // Include MCP servers if configured
+    mcpServerOptions: config.mcpServers ? { mcpServers: config.mcpServers } : {},
+  };
+}
+
+/**
+ * Build thinking options for SDK configuration.
+ * Converts ThinkingLevel to maxThinkingTokens for the Claude SDK.
+ *
+ * @param thinkingLevel - The thinking level to convert
+ * @returns Object with maxThinkingTokens if thinking is enabled
+ */
+function buildThinkingOptions(thinkingLevel?: ThinkingLevel): Partial<Options> {
+  const maxThinkingTokens = getThinkingTokenBudget(thinkingLevel);
+  logger.debug(
+    `buildThinkingOptions: thinkingLevel="${thinkingLevel}" -> maxThinkingTokens=${maxThinkingTokens}`
+  );
+  return maxThinkingTokens ? { maxThinkingTokens } : {};
 }
 
 /**
@@ -217,9 +346,20 @@ export interface CreateSdkOptionsConfig {
   /** Enable auto-loading of CLAUDE.md files via SDK's settingSources */
   autoLoadClaudeMd?: boolean;
 
-  /** Enable sandbox mode for bash command isolation */
-  enableSandboxMode?: boolean;
+  /** MCP servers to make available to the agent */
+  mcpServers?: Record<string, McpServerConfig>;
+
+  /** Extended thinking level for Claude models */
+  thinkingLevel?: ThinkingLevel;
 }
+
+// Re-export MCP types from @automaker/types for convenience
+export type {
+  McpServerConfig,
+  McpStdioServerConfig,
+  McpSSEServerConfig,
+  McpHttpServerConfig,
+} from '@automaker/types';
 
 /**
  * Create SDK options for spec generation
@@ -237,6 +377,9 @@ export function createSpecGenerationOptions(config: CreateSdkOptionsConfig): Opt
   // Build CLAUDE.md auto-loading options if enabled
   const claudeMdOptions = buildClaudeMdOptions(config);
 
+  // Build thinking options
+  const thinkingOptions = buildThinkingOptions(config.thinkingLevel);
+
   return {
     ...getBaseOptions(),
     // Override permissionMode - spec generation only needs read-only tools
@@ -248,6 +391,7 @@ export function createSpecGenerationOptions(config: CreateSdkOptionsConfig): Opt
     cwd: config.cwd,
     allowedTools: [...TOOL_PRESETS.specGeneration],
     ...claudeMdOptions,
+    ...thinkingOptions,
     ...(config.abortController && { abortController: config.abortController }),
     ...(config.outputFormat && { outputFormat: config.outputFormat }),
   };
@@ -269,6 +413,9 @@ export function createFeatureGenerationOptions(config: CreateSdkOptionsConfig): 
   // Build CLAUDE.md auto-loading options if enabled
   const claudeMdOptions = buildClaudeMdOptions(config);
 
+  // Build thinking options
+  const thinkingOptions = buildThinkingOptions(config.thinkingLevel);
+
   return {
     ...getBaseOptions(),
     // Override permissionMode - feature generation only needs read-only tools
@@ -278,6 +425,7 @@ export function createFeatureGenerationOptions(config: CreateSdkOptionsConfig): 
     cwd: config.cwd,
     allowedTools: [...TOOL_PRESETS.readOnly],
     ...claudeMdOptions,
+    ...thinkingOptions,
     ...(config.abortController && { abortController: config.abortController }),
   };
 }
@@ -298,6 +446,9 @@ export function createSuggestionsOptions(config: CreateSdkOptionsConfig): Option
   // Build CLAUDE.md auto-loading options if enabled
   const claudeMdOptions = buildClaudeMdOptions(config);
 
+  // Build thinking options
+  const thinkingOptions = buildThinkingOptions(config.thinkingLevel);
+
   return {
     ...getBaseOptions(),
     model: getModelForUseCase('suggestions', config.model),
@@ -305,6 +456,7 @@ export function createSuggestionsOptions(config: CreateSdkOptionsConfig): Option
     cwd: config.cwd,
     allowedTools: [...TOOL_PRESETS.readOnly],
     ...claudeMdOptions,
+    ...thinkingOptions,
     ...(config.abortController && { abortController: config.abortController }),
     ...(config.outputFormat && { outputFormat: config.outputFormat }),
   };
@@ -317,7 +469,6 @@ export function createSuggestionsOptions(config: CreateSdkOptionsConfig): Option
  * - Full tool access for code modification
  * - Standard turns for interactive sessions
  * - Model priority: explicit model > session model > chat default
- * - Sandbox mode controlled by enableSandboxMode setting
  * - When autoLoadClaudeMd is true, uses preset mode and settingSources for CLAUDE.md loading
  */
 export function createChatOptions(config: CreateSdkOptionsConfig): Options {
@@ -330,20 +481,22 @@ export function createChatOptions(config: CreateSdkOptionsConfig): Options {
   // Build CLAUDE.md auto-loading options if enabled
   const claudeMdOptions = buildClaudeMdOptions(config);
 
+  // Build MCP-related options
+  const mcpOptions = buildMcpOptions(config);
+
+  // Build thinking options
+  const thinkingOptions = buildThinkingOptions(config.thinkingLevel);
+
   return {
     ...getBaseOptions(),
     model: getModelForUseCase('chat', effectiveModel),
     maxTurns: MAX_TURNS.standard,
     cwd: config.cwd,
     allowedTools: [...TOOL_PRESETS.chat],
-    ...(config.enableSandboxMode && {
-      sandbox: {
-        enabled: true,
-        autoAllowBashIfSandboxed: true,
-      },
-    }),
     ...claudeMdOptions,
+    ...thinkingOptions,
     ...(config.abortController && { abortController: config.abortController }),
+    ...mcpOptions.mcpServerOptions,
   };
 }
 
@@ -354,7 +507,6 @@ export function createChatOptions(config: CreateSdkOptionsConfig): Options {
  * - Full tool access for code modification and implementation
  * - Extended turns for thorough feature implementation
  * - Uses default model (can be overridden)
- * - Sandbox mode controlled by enableSandboxMode setting
  * - When autoLoadClaudeMd is true, uses preset mode and settingSources for CLAUDE.md loading
  */
 export function createAutoModeOptions(config: CreateSdkOptionsConfig): Options {
@@ -364,20 +516,22 @@ export function createAutoModeOptions(config: CreateSdkOptionsConfig): Options {
   // Build CLAUDE.md auto-loading options if enabled
   const claudeMdOptions = buildClaudeMdOptions(config);
 
+  // Build MCP-related options
+  const mcpOptions = buildMcpOptions(config);
+
+  // Build thinking options
+  const thinkingOptions = buildThinkingOptions(config.thinkingLevel);
+
   return {
     ...getBaseOptions(),
     model: getModelForUseCase('auto', config.model),
     maxTurns: MAX_TURNS.maximum,
     cwd: config.cwd,
     allowedTools: [...TOOL_PRESETS.fullAccess],
-    ...(config.enableSandboxMode && {
-      sandbox: {
-        enabled: true,
-        autoAllowBashIfSandboxed: true,
-      },
-    }),
     ...claudeMdOptions,
+    ...thinkingOptions,
     ...(config.abortController && { abortController: config.abortController }),
+    ...mcpOptions.mcpServerOptions,
   };
 }
 
@@ -391,7 +545,6 @@ export function createCustomOptions(
   config: CreateSdkOptionsConfig & {
     maxTurns?: number;
     allowedTools?: readonly string[];
-    sandbox?: { enabled: boolean; autoAllowBashIfSandboxed?: boolean };
   }
 ): Options {
   // Validate working directory before creating options
@@ -400,14 +553,26 @@ export function createCustomOptions(
   // Build CLAUDE.md auto-loading options if enabled
   const claudeMdOptions = buildClaudeMdOptions(config);
 
+  // Build MCP-related options
+  const mcpOptions = buildMcpOptions(config);
+
+  // Build thinking options
+  const thinkingOptions = buildThinkingOptions(config.thinkingLevel);
+
+  // For custom options: use explicit allowedTools if provided, otherwise default to readOnly
+  const effectiveAllowedTools = config.allowedTools
+    ? [...config.allowedTools]
+    : [...TOOL_PRESETS.readOnly];
+
   return {
     ...getBaseOptions(),
     model: getModelForUseCase('default', config.model),
     maxTurns: config.maxTurns ?? MAX_TURNS.maximum,
     cwd: config.cwd,
-    allowedTools: config.allowedTools ? [...config.allowedTools] : [...TOOL_PRESETS.readOnly],
-    ...(config.sandbox && { sandbox: config.sandbox }),
+    allowedTools: effectiveAllowedTools,
     ...claudeMdOptions,
+    ...thinkingOptions,
     ...(config.abortController && { abortController: config.abortController }),
+    ...mcpOptions.mcpServerOptions,
   };
 }
